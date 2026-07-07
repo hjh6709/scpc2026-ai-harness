@@ -437,3 +437,16 @@ def write_submission_csv(payload: dict[str, Any], output_path: str | Path) -> No
         writer = csv.DictWriter(f, fieldnames=["submission"])
         writer.writeheader()
         writer.writerow({"submission": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))})
+
+
+def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with Path(path).open(encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise ValueError(f"{path}:{line_no} is not a JSON object")
+            rows.append(value)
+    return rows

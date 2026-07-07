@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness import FinalHarness, run_harness, write_submission_csv
+from harness import FinalHarness, load_jsonl, run_harness, write_submission_csv
 
 
 def make_task(task_id="task_1", records=None, objects=None, prompt="처리해줘", history=None):
@@ -165,6 +165,14 @@ class HarnessInterfaceTests(unittest.TestCase):
         self.assertEqual(answer["control"], "hold")
         self.assertEqual(answer["content_scope"]["mode"], "none")
         self.assertIn("precondition_changed_ignored", answer["policy"]["violations"])
+
+    def test_load_jsonl_reads_nonempty_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tasks.jsonl"
+            path.write_text(json.dumps(make_task(), ensure_ascii=False) + "\n\n", encoding="utf-8")
+            rows = load_jsonl(path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "task_1")
 
 
 if __name__ == "__main__":
