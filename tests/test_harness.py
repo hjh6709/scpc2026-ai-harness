@@ -115,6 +115,57 @@ class HarnessInterfaceTests(unittest.TestCase):
         answer = FinalHarness().answer_task(make_task(objects=objects, history=history), {})
         self.assertEqual(answer["focal_id"], "obj_b")
 
+    def test_local_update_targets_memory_store_and_status_only(self):
+        records = [
+            {"id": "r1", "type": "session_share_policy", "value": "strict"},
+            {"id": "r2", "type": "share_boundary_update", "value": "local_update_boundary"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records, prompt="바깥으로 보내지 말고 내부 상태 업데이트로 끝내줘"), {})
+        self.assertEqual(answer["target"], "memory_store")
+        self.assertEqual(answer["control"], "proceed")
+        self.assertEqual(answer["content_scope"]["mode"], "status_only")
+        self.assertIn({"verb": "update", "target": answer["focal_id"], "args": {"state": "local_status_only"}}, answer["plan_events"])
+
+    def test_ambiguous_target_requires_ask(self):
+        records = [
+            {"id": "r1", "type": "session_share_policy", "value": "strict"},
+            {"id": "r2", "type": "ambiguous_target", "value": "approved_channel_or_visible_recipient"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records, prompt="누구에게 어떤 범위로 처리할지 다시 확인해줘"), {})
+        self.assertEqual(answer["control"], "ask")
+        self.assertEqual(answer["target"], "user")
+        self.assertTrue(answer["policy"]["requires_confirmation"])
+
+    def test_sensitive_external_share_is_redacted_amend(self):
+        objects = [
+            {
+                "id": "obj_file",
+                "type": "file",
+                "attrs": {"ref_code": "WM-1111", "contains": ["summary", "raw_quote", "rrn", "name"], "recipient": "audit_vendor"},
+            }
+        ]
+        records = [
+            {"id": "r1", "type": "session_share_policy", "value": "strict"},
+            {"id": "r2", "type": "external_share_policy", "value": "redacted_summary_only"},
+            {"id": "r3", "type": "resolved_target", "value": "audit_vendor"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records, objects=objects), {})
+        self.assertEqual(answer["control"], "amend")
+        self.assertEqual(answer["content_scope"]["mode"], "redacted")
+        self.assertEqual(answer["content_scope"]["allowed_fields"], ["summary"])
+        self.assertEqual(set(answer["content_scope"]["excluded_fields"]), {"name", "raw_quote", "rrn"})
+        self.assertIn("minimal_disclosure", answer["policy"]["risk_flags"])
+
+    def test_precondition_invalidated_holds(self):
+        records = [
+            {"id": "r1", "type": "session_share_policy", "value": "strict"},
+            {"id": "r2", "type": "target_changed_after_turn", "value": "precondition_invalidated"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records, prompt="이전 조건이 바뀐 상태면 진행하지 마"), {})
+        self.assertEqual(answer["control"], "hold")
+        self.assertEqual(answer["content_scope"]["mode"], "none")
+        self.assertIn("precondition_changed_ignored", answer["policy"]["violations"])
+
 
 if __name__ == "__main__":
     unittest.main()
