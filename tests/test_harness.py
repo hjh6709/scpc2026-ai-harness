@@ -67,6 +67,54 @@ class HarnessInterfaceTests(unittest.TestCase):
             parsed = json.loads(rows[0]["submission"])
             self.assertEqual(parsed["schema"], "scpc.final.answer.v1")
 
+    def test_focal_resolution_uses_marker_trace(self):
+        objects = [
+            {"id": "obj_a", "type": "message", "attrs": {"ref_code": "WM-1111", "recipient": "wrong"}},
+            {"id": "obj_b", "type": "file", "attrs": {"ref_code": "WM-2222", "contains": ["summary"]}},
+        ]
+        records = [
+            {"id": "r1", "type": "session_share_policy", "value": "strict"},
+            {"id": "r2", "type": "route_binding_order", "value": "boundary_after_authority"},
+            {
+                "id": "r3",
+                "type": "focal_marker_refs",
+                "value": {"marker_to_ref": {"marker_alpha": "WM-1111", "marker_beta": "WM-2222"}},
+            },
+            {
+                "id": "r4",
+                "type": "focal_resolution_trace",
+                "value": {
+                    "latest_phase": "boundary",
+                    "latest_phase_rule": {"boundary_after_authority": "boundary"},
+                    "phase_source": "route_binding_order",
+                    "phase_to_marker": {"boundary": "marker_beta"},
+                },
+            },
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records, objects=objects), {})
+        self.assertEqual(answer["focal_id"], "obj_b")
+
+    def test_focal_resolution_uses_direct_object_id_record(self):
+        objects = [
+            {"id": "obj_a", "type": "message", "attrs": {"ref_code": "WM-1111"}},
+            {"id": "obj_b", "type": "file", "attrs": {"ref_code": "WM-2222"}},
+        ]
+        records = [
+            {"id": "r1", "type": "current_request_hint", "value": {"object_id": "obj_b"}},
+            {"id": "r2", "type": "session_share_policy", "value": "strict"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records, objects=objects), {})
+        self.assertEqual(answer["focal_id"], "obj_b")
+
+    def test_focal_resolution_uses_final_candidate_from_history(self):
+        objects = [
+            {"id": "obj_a", "type": "message", "attrs": {"ref_code": "WM-1111"}},
+            {"id": "obj_b", "type": "message", "attrs": {"ref_code": "WM-2222"}},
+        ]
+        history = [{"turn": 2, "summary": "최종 승인 후보 WM-2222가 현재 처리 대상이다. WM-1111는 제외 후보이다."}]
+        answer = FinalHarness().answer_task(make_task(objects=objects, history=history), {})
+        self.assertEqual(answer["focal_id"], "obj_b")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -132,8 +132,88 @@ class FinalHarness:
         }
 
 
+def _walk_strings(value: Any) -> list[str]:
+    found: list[str] = []
+    if isinstance(value, str):
+        found.append(value)
+    elif isinstance(value, dict):
+        for item in value.values():
+            found.extend(_walk_strings(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_walk_strings(item))
+    return found
+
+
+def _effective_phase(view: TaskView, trace: dict[str, Any]) -> str:
+    latest = str(trace.get("latest_phase") or "")
+    source = str(trace.get("phase_source") or "")
+    source_value = view.record_value(source) if source else None
+    phase_rule = trace.get("latest_phase_rule") if isinstance(trace.get("latest_phase_rule"), dict) else {}
+    if isinstance(source_value, str) and source_value in phase_rule:
+        return str(phase_rule[source_value])
+    return latest
+
+
 def choose_focal(view: TaskView) -> dict[str, Any]:
-    return view.objects[0] if view.objects else {}
+    objects = view.objects
+    if not objects:
+        return {}
+    by_id = view.object_by_id()
+    by_ref = view.object_by_ref()
+
+    marker_refs = view.record_value("focal_marker_refs")
+    trace = view.record_value("focal_resolution_trace")
+    if isinstance(marker_refs, dict) and isinstance(trace, dict):
+        marker_map = marker_refs.get("marker_to_ref")
+        phase_to_marker = trace.get("phase_to_marker")
+        if isinstance(marker_map, dict) and isinstance(phase_to_marker, dict):
+            phase = _effective_phase(view, trace)
+            marker = str(phase_to_marker.get(phase) or "")
+            ref = str(marker_map.get(marker) or "")
+            if ref in by_ref:
+                return by_ref[ref]
+
+    for record in reversed(view.records):
+        for candidate in _walk_strings(record.get("value")):
+            if candidate in by_id:
+                return by_id[candidate]
+
+    history = view.history_text
+    refs = re.findall(r"WM-\d+", history)
+    if refs:
+        positive_terms = ["최종", "확정", "현재 처리", "승인 후보", "처리 대상으로 확정", "selected", "final"]
+        negative_terms = ["제외", "보류", "decoy"]
+        best_ref = ""
+        best_score = -10_000
+        for index, ref in enumerate(refs):
+            ref_index = history.find(ref)
+            left = max(history.rfind(".", 0, ref_index), history.rfind("。", 0, ref_index), history.rfind("\n", 0, ref_index))
+            right_candidates = [pos for pos in [history.find(".", ref_index), history.find("。", ref_index), history.find("\n", ref_index)] if pos != -1]
+            right = min(right_candidates) if right_candidates else len(history)
+            window = history[left + 1:right]
+            score = index
+            score += 10 * sum(term in window for term in positive_terms)
+            score -= 10 * sum(term in window for term in negative_terms)
+            if score > best_score:
+                best_ref = ref
+                best_score = score
+        if best_ref in by_ref:
+            return by_ref[best_ref]
+
+    prompt_tokens = tokens(view.prompt)
+    best = objects[0]
+    best_score = -1
+    for obj in objects:
+        attrs = obj.get("attrs") or {}
+        obj_text = text_of({"type": obj.get("type"), "attrs": attrs}).lower()
+        score = sum(1 for token in prompt_tokens if token in obj_text)
+        if str(attrs.get("ref_code") or "") and str(attrs.get("ref_code")) in view.history_text:
+            score += 2
+        if score > best_score:
+            best = obj
+            best_score = score
+    return best
 
 
 def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: dict[str, Any]) -> str:
