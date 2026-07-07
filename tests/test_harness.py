@@ -115,6 +115,16 @@ class HarnessInterfaceTests(unittest.TestCase):
         answer = FinalHarness().answer_task(make_task(objects=objects, history=history), {})
         self.assertEqual(answer["focal_id"], "obj_b")
 
+    def test_focal_resolution_uses_ordinal_candidate_history(self):
+        objects = [
+            {"id": "obj_a", "type": "file", "attrs": {"ref_code": "WM-1111"}},
+            {"id": "obj_b", "type": "message", "attrs": {"ref_code": "WM-2222"}},
+            {"id": "obj_c", "type": "calendar_event", "attrs": {"ref_code": "WM-3333"}},
+        ]
+        history = [{"turn": 5, "summary": "이번 요청의 후보 참조는 순서대로 WM-1111, WM-2222, WM-3333이다. 첫 번째와 세 번째 후보는 보류 후보로 남겼고, 두 번째 후보만 현재 처리 대상으로 확정했다."}]
+        answer = FinalHarness().answer_task(make_task(objects=objects, history=history), {})
+        self.assertEqual(answer["focal_id"], "obj_b")
+
     def test_local_update_targets_memory_store_and_status_only(self):
         records = [
             {"id": "r1", "type": "session_share_policy", "value": "strict"},
@@ -173,6 +183,12 @@ class HarnessInterfaceTests(unittest.TestCase):
             rows = load_jsonl(path)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["id"], "task_1")
+
+    def test_harness_source_does_not_hardcode_task_or_session_ids(self):
+        source = Path("harness.py").read_text(encoding="utf-8")
+        forbidden_patterns = ["final_dev_", "final_screening_", "task_id ==", "session_id ==", "dev_answers.json"]
+        for pattern in forbidden_patterns:
+            self.assertNotIn(pattern, source)
 
 
 if __name__ == "__main__":

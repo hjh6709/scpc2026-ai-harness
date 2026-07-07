@@ -188,8 +188,53 @@ def choose_focal(view: TaskView) -> dict[str, Any]:
     history = view.history_text
     refs = re.findall(r"WM-\d+", history)
     if refs:
+        unique_refs = list(dict.fromkeys(refs))
+        ordinal_to_index = {
+            "첫 번째": 0,
+            "첫번째": 0,
+            "1번째": 0,
+            "두 번째": 1,
+            "두번째": 1,
+            "2번째": 1,
+            "세 번째": 2,
+            "세번째": 2,
+            "3번째": 2,
+        }
         positive_terms = ["최종", "확정", "현재 처리", "승인 후보", "처리 대상으로 확정", "selected", "final"]
         negative_terms = ["제외", "보류", "decoy"]
+        if any(term in history for term in ["후보만 현재 처리 대상으로 확정", "후보만 현재 처리", "후보만 확정"]):
+            best_ordinal_ref = ""
+            best_ordinal_score = -10_000
+            for ordinal, ref_index in ordinal_to_index.items():
+                ordinal_index = history.find(ordinal)
+                if ordinal_index == -1 or ref_index >= len(unique_refs):
+                    continue
+                left = max(
+                    history.rfind(".", 0, ordinal_index),
+                    history.rfind("。", 0, ordinal_index),
+                    history.rfind(",", 0, ordinal_index),
+                    history.rfind("，", 0, ordinal_index),
+                    history.rfind("\n", 0, ordinal_index),
+                )
+                right_candidates = [
+                    pos
+                    for pos in [
+                        history.find(".", ordinal_index),
+                        history.find("。", ordinal_index),
+                        history.find(",", ordinal_index),
+                        history.find("，", ordinal_index),
+                        history.find("\n", ordinal_index),
+                    ]
+                    if pos != -1
+                ]
+                right = min(right_candidates) if right_candidates else len(history)
+                window = history[left + 1:right]
+                score = 10 * sum(term in window for term in positive_terms) - 10 * sum(term in window for term in negative_terms)
+                if score > best_ordinal_score:
+                    best_ordinal_ref = unique_refs[ref_index]
+                    best_ordinal_score = score
+            if best_ordinal_score > 0 and best_ordinal_ref in by_ref:
+                return by_ref[best_ordinal_ref]
         best_ref = ""
         best_score = -10_000
         for index, ref in enumerate(refs):
@@ -226,16 +271,28 @@ def _record_values_text(view: TaskView) -> str:
     return " ".join(text_of(record.get("value")) for record in view.records).lower()
 
 
+def _has_value(view: TaskView, *needles: str) -> bool:
+    values = _record_values_text(view) + " " + view.prompt.lower() + " " + view.history_text.lower()
+    return any(needle.lower() in values for needle in needles)
+
+
 def _is_local_update(view: TaskView) -> bool:
     values = _record_values_text(view)
-    prompt = view.prompt.lower()
+    prompt = view.prompt.lower() + " " + view.history_text.lower()
     return (
         "persistent_memory_write" in view.record_types
-        or any(value in values for value in LOCAL_UPDATE_VALUES)
+        or "local_update_only" in values
+        or "memory_write" in values
         or "내부 상태 업데이트" in prompt
         or "바깥으로 보내지 말고" in prompt
-        or "local_update" in values
+        or "내 기기 안에서 상태만 갱신" in prompt
+        or "외부 공유가 아니라" in prompt
     )
+
+
+def _has_status_update_boundary(view: TaskView) -> bool:
+    values = _record_values_text(view)
+    return "local_update_boundary" in values or _is_local_update(view)
 
 
 def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: dict[str, Any]) -> str:
@@ -267,9 +324,25 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
         return "hold"
     if "consent" in types and any(word in values for word in ["revoked", "withdraw", "denied", "철회", "거부"]):
         return "hold"
+    if _has_value(view, "취소된", "더 진행하면 안 된다", "전제가 사라", "실행하면 안 된다", "precondition_invalidated", "prior_success_invalidated"):
+        return "hold"
+    if any(word in prompt for word in ["다시 확인", "누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인"]):
+        return "ask"
     if _is_local_update(view):
         return "proceed"
-    if types & ASK_RECORD_TYPES or any(word in prompt for word in ["다시 확인", "확인해", "모호", "누구에게 어떤 범위"]):
+    if _has_status_update_boundary(view) and "ambiguous_target" not in types and _has_value(view, "internal_binding_confirmed", "route_verified", "single_internal_candidate"):
+        return "proceed"
+    if _has_value(view, "redacted_summary_only", "summary_only", "minimal_disclosure", "식별 가능한 세부값을 제외"):
+        return "amend"
+    if _has_value(view, "raw_sensitive_forbidden", "privacy_rule_violation"):
+        return "hold"
+    if _has_value(view, "dispatch_blocked_until_binding", "authority_incomplete", "route_resolution_required", "target_conflict"):
+        return "ask"
+    if "ambiguous_target" in types and _has_value(view, "internal_binding_confirmed", "route_verified", "single_internal_candidate"):
+        return "amend"
+    if _has_value(view, "confirmation_required", "route_resolution_required", "target_conflict"):
+        return "ask"
+    if types & ASK_RECORD_TYPES:
         return "ask"
     if types & EXTERNAL_RECORD_TYPES or evidence.get("requires_redaction") or contained_fields(focal) & SENSITIVE_FIELDS:
         return "amend"
@@ -287,8 +360,8 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
     if control == "hold":
         return {"mode": "none", "allowed_fields": [], "excluded_fields": [], "requires_user_confirmation": False}
     if control == "ask":
-        return {"mode": "summary", "allowed_fields": ["status"], "excluded_fields": excluded, "requires_user_confirmation": True}
-    if _is_local_update(view):
+        return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": excluded, "requires_user_confirmation": True}
+    if _has_status_update_boundary(view):
         local_excluded = sorted((contains & SENSITIVE_FIELDS) | {"raw_quote", "location", "numeric_value"})
         return {"mode": "status_only", "allowed_fields": ["status"], "excluded_fields": local_excluded, "requires_user_confirmation": False}
     if control == "amend":
@@ -305,7 +378,7 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
     contains = contained_fields(focal)
     if "session_share_policy" in types:
         flags.add("strict_share_policy")
-    if _is_local_update(view):
+    if _has_status_update_boundary(view):
         flags.add("local_only")
     if types & EXTERNAL_RECORD_TYPES or "external" in values or "외부" in view.prompt:
         flags.add("external_share")
@@ -321,13 +394,20 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         flags.add("minimal_disclosure")
     if types & PRECONDITION_RECORD_TYPES or "precondition" in values:
         flags.add("precondition_changed")
+    if _has_value(view, "dispatch_blocked_until_binding", "authority_incomplete"):
+        flags.add("target_ambiguity")
+    if _has_value(view, "redacted_summary_only", "summary_only", "minimal_disclosure", "식별 가능한 세부값을 제외"):
+        flags.add("minimal_disclosure")
+    if _has_value(view, "raw_sensitive_forbidden", "privacy_rule_violation"):
+        flags.add("safety")
     if control == "hold":
         flags.add("safety")
     violations: set[str] = set()
-    if control == "hold" and ("precondition" in values or types & PRECONDITION_RECORD_TYPES):
+    if control == "hold" and ("precondition" in values or "취소" in view.history_text or "취소" in view.prompt or types & PRECONDITION_RECORD_TYPES):
         flags.add("precondition_invalidated")
         violations.add("precondition_changed_ignored")
-    return {"risk_flags": sorted(flags), "violations": sorted(violations), "requires_confirmation": control == "ask"}
+    requires_confirmation = control == "ask" or (control != "hold" and ("ambiguous_target" in types or "precondition" in values))
+    return {"risk_flags": sorted(flags), "violations": sorted(violations), "requires_confirmation": requires_confirmation}
 
 
 def build_plan_events(focal_id: str, target: str, control: str, scope: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, Any]]:
@@ -342,7 +422,7 @@ def build_plan_events(focal_id: str, target: str, control: str, scope: dict[str,
     if control == "ask":
         reason = "target_ambiguity" if "target_ambiguity" in policy.get("risk_flags", []) else "clarification_required"
         events.append({"verb": "clarify", "target": "user", "args": {"reason": reason}})
-    elif scope.get("mode") == "status_only" and target == "memory_store":
+    elif scope.get("mode") == "status_only":
         events.append({"verb": "verify", "target": "share_boundary_update", "args": {"scope": "local_update"}})
         events.append({"verb": "update", "target": focal_id, "args": {"state": "local_status_only"}})
     elif control == "amend":
