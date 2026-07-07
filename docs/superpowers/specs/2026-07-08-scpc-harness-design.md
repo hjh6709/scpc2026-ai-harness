@@ -38,7 +38,7 @@ Answer payload:
     "fixed_slm_policy": "local_fixed_slm_only",
     "model_id": "scpc-final-fixed-slm-local-facade",
     "temperature": 0.0,
-    "seed": 2026
+    "seed": 42
   },
   "answers": {}
 }
@@ -49,6 +49,13 @@ Each answer contains `focal_id`, `target`, `control`, `content_scope`, `policy`,
 ## Architecture
 
 The implementation will use small deterministic modules inside `harness.py`.
+
+The public verification interface is `FinalHarness.answer_task(task, session)`. The
+class must be importable without side effects and must initialize a local
+`FixedSLMClient` facade. `FixedSLMClient.summarize_task()` may provide evidence
+signals, but it must not directly return final answers. The final `focal_id`,
+`target`, `control`, `content_scope`, `policy`, and `plan_events` are produced by
+deterministic harness logic.
 
 1. `TaskView`
    Normalizes access to records, objects, visible history, object attributes, ref codes, and text tokens.
@@ -204,10 +211,13 @@ Verification commands:
 Success criteria:
 
 - No external network/API use.
+- No external model or non-provided pretrained model use.
+- `FinalHarness.answer_task(task, session)` works as the top-level organizer verification interface.
 - `submission.csv` has exactly one `submission` column and one row.
 - Dev score improves materially over the baseline notebook.
-- No task-id answer map or screening-specific lookup table exists in code.
+- No task-id, session-id, public screening row, or answer-map hardcoding exists in code.
 - Harness remains deterministic across repeated runs.
+- Submission metadata uses `fixed_slm_policy=local_fixed_slm_only`, `model_id=scpc-final-fixed-slm-local-facade`, `temperature=0.0`, and `seed=42`.
 
 ## Risks and Mitigations
 
