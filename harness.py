@@ -160,6 +160,30 @@ def _effective_phase(view: TaskView, trace: dict[str, Any]) -> str:
     return latest
 
 
+FOCAL_ORDINAL_WORDS = {
+    "첫": 0, "두": 1, "세": 2, "네": 3, "다섯": 4,
+    "여섯": 5, "일곱": 6, "여덟": 7, "아홉": 8, "열": 9,
+}
+FOCAL_POSITIVE_TERMS = ["확정", "최종", "선택", "지정", "채택", "결정", "승인", "처리 대상", "selected", "final", "confirm"]
+FOCAL_NEGATIVE_TERMS = ["제외", "보류", "무시", "폐기", "취소", "decoy", "hold", "exclude"]
+
+
+def _split_sentences(text: str) -> list[str]:
+    return [s for s in re.split(r"[.。,，\n]", text) if s.strip()]
+
+
+def _ordinal_indices(sentence: str) -> list[int]:
+    indices: set[int] = set()
+    for match in re.finditer(r"(\d+)\s*번째", sentence):
+        value = int(match.group(1)) - 1
+        if value >= 0:
+            indices.add(value)
+    for word, index in FOCAL_ORDINAL_WORDS.items():
+        if f"{word}번째" in sentence or f"{word} 번째" in sentence or f"{word}째" in sentence:
+            indices.add(index)
+    return sorted(indices)
+
+
 def choose_focal(view: TaskView) -> dict[str, Any]:
     objects = view.objects
     if not objects:
@@ -188,56 +212,33 @@ def choose_focal(view: TaskView) -> dict[str, Any]:
     refs = re.findall(r"WM-\d+", history)
     if refs:
         unique_refs = list(dict.fromkeys(refs))
-        if len(unique_refs) >= 3 and any(term in history for term in ["가운데 항목", "가운데 후보", "중간 항목", "중간 후보"]):
+
+        if (
+            len(unique_refs) >= 2
+            and any(term in history for term in ("가운데", "중간"))
+            and any(term in history for term in ("항목", "후보"))
+        ):
             middle_ref = unique_refs[len(unique_refs) // 2]
             if middle_ref in by_ref:
                 return by_ref[middle_ref]
-        ordinal_to_index = {
-            "첫 번째": 0,
-            "첫번째": 0,
-            "1번째": 0,
-            "두 번째": 1,
-            "두번째": 1,
-            "2번째": 1,
-            "세 번째": 2,
-            "세번째": 2,
-            "3번째": 2,
-        }
-        positive_terms = ["최종", "확정", "현재 처리", "승인 후보", "처리 대상으로 확정", "selected", "final"]
-        negative_terms = ["제외", "보류", "decoy"]
-        if any(term in history for term in ["후보만 현재 처리 대상으로 확정", "후보만 현재 처리", "후보만 확정"]):
-            best_ordinal_ref = ""
-            best_ordinal_score = -10_000
-            for ordinal, ref_index in ordinal_to_index.items():
-                ordinal_index = history.find(ordinal)
-                if ordinal_index == -1 or ref_index >= len(unique_refs):
-                    continue
-                left = max(
-                    history.rfind(".", 0, ordinal_index),
-                    history.rfind("。", 0, ordinal_index),
-                    history.rfind(",", 0, ordinal_index),
-                    history.rfind("，", 0, ordinal_index),
-                    history.rfind("\n", 0, ordinal_index),
-                )
-                right_candidates = [
-                    pos
-                    for pos in [
-                        history.find(".", ordinal_index),
-                        history.find("。", ordinal_index),
-                        history.find(",", ordinal_index),
-                        history.find("，", ordinal_index),
-                        history.find("\n", ordinal_index),
-                    ]
-                    if pos != -1
-                ]
-                right = min(right_candidates) if right_candidates else len(history)
-                window = history[left + 1:right]
-                score = 10 * sum(term in window for term in positive_terms) - 10 * sum(term in window for term in negative_terms)
-                if score > best_ordinal_score:
-                    best_ordinal_ref = unique_refs[ref_index]
-                    best_ordinal_score = score
-            if best_ordinal_score > 0 and best_ordinal_ref in by_ref:
-                return by_ref[best_ordinal_ref]
+
+        ordinal_scores: dict[int, int] = {}
+        for sentence in _split_sentences(history):
+            indices = _ordinal_indices(sentence)
+            if not indices:
+                continue
+            weight = 10 * sum(term in sentence for term in FOCAL_POSITIVE_TERMS)
+            weight -= 10 * sum(term in sentence for term in FOCAL_NEGATIVE_TERMS)
+            for index in indices:
+                if index < len(unique_refs):
+                    ordinal_scores[index] = ordinal_scores.get(index, 0) + weight
+        if ordinal_scores:
+            best_index = max(ordinal_scores, key=lambda i: ordinal_scores[i])
+            if ordinal_scores[best_index] > 0:
+                best_ordinal_ref = unique_refs[best_index]
+                if best_ordinal_ref in by_ref:
+                    return by_ref[best_ordinal_ref]
+
         best_ref = ""
         best_score = -10_000
         for index, ref in enumerate(refs):
@@ -247,8 +248,8 @@ def choose_focal(view: TaskView) -> dict[str, Any]:
             right = min(right_candidates) if right_candidates else len(history)
             window = history[left + 1:right]
             score = index
-            score += 10 * sum(term in window for term in positive_terms)
-            score -= 10 * sum(term in window for term in negative_terms)
+            score += 10 * sum(term in window for term in FOCAL_POSITIVE_TERMS)
+            score -= 10 * sum(term in window for term in FOCAL_NEGATIVE_TERMS)
             if score > best_score:
                 best_ref = ref
                 best_score = score
@@ -282,19 +283,18 @@ def _has_value(view: TaskView, *needles: str) -> bool:
 def _precondition_invalidated(view: TaskView) -> bool:
     return _has_value(
         view,
-        "취소된",
-        "더 진행하면 안 된다",
+        "취소되",
+        "진행하면 안",
         "전제가 사라",
-        "실행하면 안 된다",
+        "실행하면 안",
         "precondition_invalidated",
         "prior_success_invalidated",
-        "허용 근거가",
-        "깨졌으므로",
-        "멈춰야 한다",
-        "과거 승인에 기대면 안 되는 상태",
-        "실행을 막아야",
+        "허용 근거",
+        "깨졌",
+        "멈춰야",
+        "기대면 안",
+        "막아야",
         "전제를 무효화",
-        "이전 허용의 전제",
     )
 
 
@@ -336,26 +336,25 @@ def _doctor_note_external_scope_uncertain(view: TaskView, focal: dict[str, Any])
         and ("doctor_note" in raw_fields or "raw_quote" in contained_fields(focal))
         and view.record_value("external_share_policy") == "doctor_note_forbidden"
         and not _is_local_update(view)
-        and _has_value(view, "새 전제가 확정되지", "누구에게 어떤 범위로 처리할지 다시 확인")
+        and _has_value(view, "확정되지", "누구에게 어떤 범위")
     )
 
 
 def _confirmation_precondition(view: TaskView) -> bool:
     return _has_value(
         view,
-        "새 전제가 확정되지",
-        "처리 전에 사용자에게 먼저 확인",
+        "확정되지",
+        "사용자에게 먼저 확인",
         "누구에게 어떤 범위",
-        "대상이나 전제 조건이 바뀌었는지",
+        "전제 조건이 바뀌",
     )
 
 
 def _condition_uncertain(view: TaskView) -> bool:
     return _has_value(
         view,
-        "조건 변경 여부가 미확정",
-        "현재 정보만으로는 결론",
-        "최종 수신처와 허용 범위가 아직 확정되지",
+        "미확정",
+        "결론을 내릴 수 없",
         "허용 범위가 아직 확정되지",
     )
 
@@ -365,13 +364,7 @@ def _stored_channel_ambiguous(view: TaskView) -> bool:
 
 
 def _persistent_memory_sensitive_share(view: TaskView) -> bool:
-    return "persistent_memory_recall" in view.record_types and _has_value(
-        view,
-        "위치나 나이",
-        "민감 내용",
-        "민감한 내용",
-        "민감 내용은 알아서",
-    )
+    return "persistent_memory_recall" in view.record_types and _has_value(view, "민감", "위치나 나이")
 
 
 def _prior_success_memory_reuse(view: TaskView) -> bool:
@@ -413,7 +406,7 @@ def _guardrail_blocked_binding(view: TaskView) -> bool:
 
 
 def _mixed_local_external_confirmation(view: TaskView) -> bool:
-    return _has_value(view, "상태 업데이트와 외부 공유가 함께 언급", "로컬 처리로 단정하지 말고 사용자 확인")
+    return _has_value(view, "업데이트와 외부 공유", "로컬 처리로 단정")
 
 
 def _external_binding_blocked(view: TaskView) -> bool:
@@ -421,10 +414,10 @@ def _external_binding_blocked(view: TaskView) -> bool:
         view.record_value("route_candidate_snapshot") == "external_candidates_present"
         and view.record_value("share_boundary_update") == "dispatch_blocked_until_binding"
         and view.record_value("dispatch_authority_check") in {"authority_incomplete", "user_binding_pending"}
-        and not _has_value(view, "식별 가능한 세부값을 제외", "redacted_summary_only", "summary_only", "minimal_disclosure")
+        and not _has_value(view, "세부값을 제외", "redacted_summary_only", "summary_only", "minimal_disclosure")
         and not _condition_uncertain(view)
         and not _mixed_local_external_confirmation(view)
-        and not _has_value(view, "표면 문장만")
+        and not _has_value(view, "표면 문장")
     )
 
 
@@ -465,8 +458,8 @@ def _summary_only_composite_plan(view: TaskView) -> bool:
     text = view.all_text
     return (
         view.record_value("resolved_target") is not None
-        and any(term in text for term in ["요약본만", "요약만 보내", "요약만 공유"])
-        and "임시 알림 설정" in text
+        and any(term in text for term in ["요약본만", "요약만"])
+        and "임시 알림" in text
         and _has_value(view, "최근 동의", "최신 consent")
         and _has_value(view, "masked_ref")
         and not _condition_uncertain(view)
@@ -496,19 +489,6 @@ def _revoked_or_security_precondition(view: TaskView) -> bool:
     )
 
 
-def _memory_domain_target(view: TaskView) -> str:
-    if "persistent_memory_recall" not in view.record_types:
-        return ""
-    if view.record_value("memory_conflict") == "latest_tone_conflicts_with_stored_preference":
-        return "clinic_portal"
-    text = view.prompt.lower() + " " + view.history_text.lower()
-    if any(term in text for term in ["검진", "병원", "클리닉"]):
-        return "clinic_portal" if _stored_channel_ambiguous(view) and not _has_value(view, "local_update_boundary") else "caregiver"
-    if any(term in text for term in ["생일 준비", "선물 준비"]):
-        return "caregiver"
-    return ""
-
-
 def _same_context_followup(view: TaskView) -> bool:
     return _has_value(view, "그대로 진행", "이전 요청 그대로", "같은 곳", "방금 내용", "지난번 방식", "같은 방식")
 
@@ -535,6 +515,10 @@ def _prior_local_only_external_followup(view: TaskView, session: dict[str, Any])
     return prior_local and wants_external and not _is_local_update(view)
 
 
+LOCAL_UPDATE_NEGATION_TERMS = ("보내지 말고", "전달 대신", "동작은 취소", "공유하지 말고", "작업은 취소", "외부 공유가 아니라")
+LOCAL_UPDATE_SCOPE_TERMS = ("내부 상태", "내부 업데이트", "기기 내부", "기기 안", "상태만", "상태값만", "로컬 상태", "로컬")
+
+
 def _is_local_update(view: TaskView) -> bool:
     values = _record_values_text(view)
     prompt = view.prompt.lower() + " " + view.history_text.lower()
@@ -542,18 +526,10 @@ def _is_local_update(view: TaskView) -> bool:
         "persistent_memory_write" in view.record_types
         or "local_update_only" in values
         or "memory_write" in values
-        or "내부 상태 업데이트" in prompt
-        or "바깥으로 보내지 말고" in prompt
-        or "전달 동작은 취소" in prompt
-        or "보내는 작업은 취소하고 로컬 상태" in prompt
-        or "장치 안의 처리 상태만" in prompt
-        or "기기 내부 업데이트만" in prompt
-        or "수신처 전달 대신" in prompt
-        or "로컬 상태 기록으로만" in prompt
-        or "공유하지 말고 상태값만 갱신" in prompt
-        or "상태값만 갱신" in prompt
-        or "내 기기 안에서 상태만 갱신" in prompt
-        or "외부 공유가 아니라" in prompt
+        or (
+            any(term in prompt for term in LOCAL_UPDATE_NEGATION_TERMS)
+            and any(term in prompt for term in LOCAL_UPDATE_SCOPE_TERMS)
+        )
     )
 
 
@@ -574,62 +550,73 @@ def _unique_object_target(view: TaskView, focal_id: str = "") -> str:
     return next(iter(candidates)) if len(candidates) == 1 else ""
 
 
-def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: dict[str, Any]) -> str:
-    if _is_local_update(view):
-        return "memory_store"
-    if _prior_success_memory_reuse(view) and control == "amend":
-        return "legal_review"
-    if _enterprise_policy_review(view) and control in {"amend", "ask", "hold"}:
-        return "privacy_review"
-    if control == "hold" and _child_sleep_lighting_memory_block(view):
-        return "living_room"
-    if control == "hold" and _precondition_invalidated(view):
-        return "user"
-    changed_target = view.record_value("target_changed_after_turn")
-    if control == "ask" and isinstance(changed_target, str) and "route_superseded" in changed_target:
-        return "security_review"
-    if control == "ask" and isinstance(changed_target, str) and changed_target and "invalidated" not in changed_target:
-        return changed_target
-    if control == "ask" and "duration_ambiguous" in view.record_types:
-        return "user"
-    resolved = view.record_value("resolved_target")
-    if (
-        control == "ask"
-        and "ambiguous_focal" in view.record_types
-        and isinstance(resolved, str)
-        and resolved
-        and not _has_value(view, "새 전제가 확정되지", "사용자에게 먼저 확인", "누구에게 어떤 범위")
-    ):
-        return resolved
-    memory_target = _memory_domain_target(view)
-    if memory_target and control in {"ask", "amend"} and "memory_conflict" in view.record_types:
-        return memory_target
-    if control == "ask" and (_condition_uncertain(view) or _doctor_note_external_scope_uncertain(view, focal)):
-        return "user"
-    if control == "ask" and (_prior_hold_followup(view, session) or _prior_local_only_external_followup(view, session)):
-        return "user"
-    if memory_target and control in {"ask", "amend"}:
-        return memory_target
-    explicit_user_confirmation = any(word in view.prompt.lower() for word in ["누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인"])
-    if control == "ask" and not explicit_user_confirmation:
-        resolved = view.record_value("resolved_target")
-        if isinstance(resolved, str) and resolved:
-            return resolved
-        object_target = _unique_object_target(view, str(focal.get("id") or ""))
-        if object_target:
-            return object_target
-    if control == "ask":
-        return "user"
+TARGET_STATUS_LABEL_TOKENS = ("invalidated", "superseded", "changed", "pending", "conflict", "unresolved")
+
+
+def _looks_like_target_name(value: str) -> bool:
+    lowered = value.lower()
+    return bool(value) and not any(token in lowered for token in TARGET_STATUS_LABEL_TOKENS)
+
+
+def _resolved_target_value(resolved: Any) -> str:
     if isinstance(resolved, dict):
         for key in ("target", "route", "value", "name", "recipient", "channel"):
             if resolved.get(key):
                 return str(resolved[key])
-    if isinstance(resolved, str) and resolved:
+        return ""
+    if isinstance(resolved, str):
         return resolved
+    return ""
+
+
+def _explicit_user_confirmation_requested(view: TaskView) -> bool:
+    return any(word in view.prompt.lower() for word in ["누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인", "다시 확인"])
+
+
+def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: dict[str, Any]) -> str:
+    # Target is always derived from structured task signals (resolved_target record,
+    # target_changed_after_turn record, or object attrs) — never a guessed domain name,
+    # since guessed vocabulary only matches the specific wording it was tuned against.
+    if _is_local_update(view):
+        return "memory_store"
+
+    if control == "hold" and _precondition_invalidated(view):
+        return "user"
+
+    changed_target = view.record_value("target_changed_after_turn")
+    if isinstance(changed_target, str) and _looks_like_target_name(changed_target):
+        return changed_target
+
+    resolved_value = _resolved_target_value(view.record_value("resolved_target"))
+
+    # A resolved target survives a generic "confirmation needed" signal when the
+    # ambiguity is about which focal object to use, not about the target itself.
+    if control == "ask" and "ambiguous_focal" in view.record_types and resolved_value:
+        return resolved_value
+
+    if control == "ask" and (
+        _condition_uncertain(view)
+        or _doctor_note_external_scope_uncertain(view, focal)
+        or _explicit_user_confirmation_requested(view)
+        or _prior_hold_followup(view, session)
+        or _prior_local_only_external_followup(view, session)
+        or "duration_ambiguous" in view.record_types
+    ):
+        return "user"
+    if resolved_value:
+        return resolved_value
+
     attrs = focal.get("attrs") or {}
     for key in ("recipient", "target", "channel", "app", "merchant", "attendee", "name"):
         if attrs.get(key):
             return str(attrs[key])
+
+    object_target = _unique_object_target(view, str(focal.get("id") or ""))
+    if object_target:
+        return object_target
+
+    if control == "ask":
+        return "user"
     return str(session.get("last_target") or "user")
 
 
@@ -758,7 +745,7 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
         or _condition_uncertain(view)
         or ("ambiguous_focal" in view.record_types and view.record_value("resolved_target") is not None)
     ):
-        mode = "redacted" if _has_value(view, "민감 성분을 제거", "점검 내용", "check summary", "원본", "사진", "duration_ambiguous", "대상이나 전제 조건") else "summary"
+        mode = "redacted" if _has_value(view, "민감", "점검 내용", "check summary", "원본", "사진", "duration_ambiguous", "전제 조건") else "summary"
         return {"mode": mode, "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
     if control == "ask":
         return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": excluded, "requires_user_confirmation": True}
