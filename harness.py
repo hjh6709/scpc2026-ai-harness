@@ -523,6 +523,7 @@ def _prior_local_only_external_followup(view: TaskView, session: dict[str, Any])
 LOCAL_UPDATE_NEGATION_TERMS = (
     "보내지 말고", "전달 대신", "동작은 취소", "공유하지 말고", "작업은 취소", "외부 공유가 아니라",
     "전송을 하지 말고", "보내기는 접고", "넘기는 대신", "전달 단계는 빼고", "처리는 생략하고", "외부 전달", "외부 전송",
+    "작업이 아니라",
 )
 LOCAL_UPDATE_SCOPE_TERMS = ("내부", "기기 안", "장치 안", "상태", "로컬", "완료 상태")
 
