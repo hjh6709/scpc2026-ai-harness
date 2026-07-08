@@ -311,6 +311,74 @@ class HarnessInterfaceTests(unittest.TestCase):
         self.assertEqual(answer["target"], "security_review")
         self.assertEqual(answer["content_scope"]["mode"], "none")
 
+    def test_raw_sensitive_forbidden_amends_external_share(self):
+        task = make_task(
+            records=[
+                {"id": "r1", "type": "current_request_hint", "value": "resolve focal object from prompt, object attrs, and latest records"},
+                {"id": "r2", "type": "resolved_target", "value": "audit_vendor"},
+                {"id": "r3", "type": "external_share_policy", "value": "raw_sensitive_forbidden"},
+                {"id": "r4", "type": "session_share_policy", "value": "strict"},
+            ],
+            objects=[
+                {
+                    "id": "expense_file",
+                    "type": "file",
+                    "attrs": {"contains": ["name", "rrn", "amount", "raw_quote"], "title": "expense original", "ref_code": "WM-1000"},
+                }
+            ],
+            prompt="Share that material with the requester and check which original/photo fields can be sent.",
+        )
+        answer = FinalHarness().answer_task(task, {})
+        self.assertEqual(answer["target"], "audit_vendor")
+        self.assertEqual(answer["control"], "amend")
+        self.assertEqual(answer["content_scope"]["mode"], "redacted")
+        self.assertIn("raw_quote", answer["content_scope"]["excluded_fields"])
+
+    def test_temporary_override_amends_privacy_setting(self):
+        task = make_task(
+            records=[
+                {"id": "r1", "type": "current_request_hint", "value": "resolve focal object from prompt, object attrs, and latest records"},
+                {"id": "r2", "type": "temporary_override_allowed", "value": "2h"},
+                {"id": "r3", "type": "session_share_policy", "value": "strict"},
+            ],
+            objects=[
+                {
+                    "id": "setting",
+                    "type": "device_setting",
+                    "attrs": {"name": "location_share", "current": "restricted", "owner": "user", "ref_code": "WM-1000"},
+                }
+            ],
+            prompt="Enable this setting, but account for the privacy condition and duration.",
+        )
+        answer = FinalHarness().answer_task(task, {})
+        self.assertEqual(answer["target"], "location_share")
+        self.assertEqual(answer["control"], "amend")
+        self.assertEqual(answer["content_scope"]["mode"], "redacted")
+
+    def test_same_place_check_summary_amends_to_resolved_target(self):
+        task = make_task(
+            records=[
+                {"id": "r1", "type": "current_request_hint", "value": "resolve focal object from prompt, object attrs, and latest records"},
+                {"id": "r2", "type": "resolved_target", "value": "legal_review"},
+                {"id": "r3", "type": "session_share_policy", "value": "strict"},
+            ],
+            objects=[
+                {
+                    "id": "check_msg",
+                    "type": "message",
+                    "attrs": {"body": "Send only the latest check summary to the same place.", "recipient": "minji", "ref_code": "WM-1000"},
+                }
+            ],
+            prompt="Send the latest check summary to the same place, but judge route and safety first.",
+            history=[
+                {"summary": "Recent consent, security alerts, and share-boundary updates override prior allowance.", "turn": 2},
+            ],
+        )
+        answer = FinalHarness().answer_task(task, {})
+        self.assertEqual(answer["target"], "legal_review")
+        self.assertEqual(answer["control"], "amend")
+        self.assertEqual(answer["content_scope"]["mode"], "redacted")
+
     def test_validate_payload_rejects_control_plan_contradictions(self):
         def payload_for(answer):
             return {
@@ -531,9 +599,110 @@ class HarnessInterfaceTests(unittest.TestCase):
             {"id": "r2", "type": "resolved_target", "value": "family_room"},
             {"id": "r3", "type": "target_changed_after_turn", "value": "privacy_review"},
         ]
-        answer = FinalHarness().answer_task(make_task(records=records, prompt="같은 곳에 방금 점검 내용을 보내줘. 최신 route를 먼저 판정해줘."), {})
+        history = [{"summary": "요약만 공유할 수 있어 보이더라도, 최종 수신처와 허용 범위가 아직 확정되지 않았으므로 먼저 확인한다."}]
+        answer = FinalHarness().answer_task(make_task(records=records, prompt="같은 곳에 방금 점검 내용을 보내줘. 최신 route를 먼저 판정해줘.", history=history), {})
         self.assertEqual(answer["control"], "ask")
         self.assertEqual(answer["target"], "privacy_review")
+        self.assertIn("raw_quote", answer["content_scope"]["excluded_fields"])
+
+    def test_guardrail_blocked_binding_holds_as_invalidated_precondition(self):
+        records = [
+            {"id": "r1", "type": "guardrail_ladder_signal", "value": "positive_then_negative_then_latest_then_final_check"},
+            {"id": "r2", "type": "ambiguous_target", "value": "approved_channel_or_visible_recipient"},
+            {"id": "r3", "type": "session_share_policy", "value": "strict"},
+            {"id": "r4", "type": "route_candidate_snapshot", "value": "external_candidates_present"},
+            {"id": "r5", "type": "dispatch_authority_check", "value": "authority_incomplete"},
+            {"id": "r6", "type": "share_boundary_update", "value": "dispatch_blocked_until_binding"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records, prompt="가능하면 처리하되, 상위 금지 원칙과 최신 수신처 모호성을 차례로 확인해줘."), {})
+        self.assertEqual(answer["control"], "hold")
+        self.assertEqual(answer["content_scope"]["mode"], "none")
+        self.assertIn("precondition_invalidated", answer["policy"]["risk_flags"])
+        self.assertIn("precondition_changed_ignored", answer["policy"]["violations"])
+
+    def test_guardrail_verified_external_route_proceeds_raw(self):
+        records = [
+            {"id": "r1", "type": "guardrail_ladder_signal", "value": "positive_then_negative_then_latest_then_final_check"},
+            {"id": "r2", "type": "ambiguous_target", "value": "approved_channel_or_visible_recipient"},
+            {"id": "r3", "type": "session_share_policy", "value": "strict"},
+            {"id": "r4", "type": "route_candidate_snapshot", "value": "single_internal_candidate"},
+            {"id": "r5", "type": "dispatch_authority_check", "value": "internal_binding_confirmed"},
+            {"id": "r6", "type": "share_boundary_update", "value": "redacted_external_boundary"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records, prompt="가능하면 처리하되, 상위 금지 원칙과 최신 수신처 모호성을 차례로 확인해줘."), {})
+        self.assertEqual(answer["control"], "proceed")
+        self.assertEqual(answer["content_scope"]["mode"], "raw")
+        self.assertEqual(answer["content_scope"]["allowed_fields"], ["summary", "title"])
+
+    def test_external_binding_blocked_without_confirmation_context_holds(self):
+        records = [
+            {"id": "r1", "type": "ambiguous_focal", "value": "multiple_focal_candidates_present"},
+            {"id": "r2", "type": "resolved_target", "value": "family_room"},
+            {"id": "r3", "type": "session_share_policy", "value": "strict"},
+            {"id": "r4", "type": "route_candidate_snapshot", "value": "external_candidates_present"},
+            {"id": "r5", "type": "dispatch_authority_check", "value": "user_binding_pending"},
+            {"id": "r6", "type": "share_boundary_update", "value": "dispatch_blocked_until_binding"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records, prompt="그 자료를 요청한 곳에 공유해줘. 원본과 사진 중 무엇을 보낼 수 있는지도 확인해줘."), {})
+        self.assertEqual(answer["control"], "hold")
+        self.assertEqual(answer["target"], "family_room")
+        self.assertIn("precondition_invalidated", answer["policy"]["risk_flags"])
+
+    def test_surface_resolved_channel_conflict_asks_before_redacted_dispatch(self):
+        records = [
+            {"id": "r1", "type": "resolved_target", "value": "privacy_review"},
+            {"id": "r2", "type": "ambiguous_target", "value": "surface_recipient_and_resolved_target_both_recent"},
+            {"id": "r3", "type": "session_share_policy", "value": "strict"},
+            {"id": "r4", "type": "route_candidate_snapshot", "value": "single_internal_candidate"},
+            {"id": "r5", "type": "dispatch_authority_check", "value": "internal_binding_confirmed"},
+            {"id": "r6", "type": "share_boundary_update", "value": "redacted_external_boundary"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records, prompt="표면 recipient와 방금 확정된 승인 채널이 다를 수 있다. 최신 target과 공유 범위를 판정해서 처리해줘."), {})
+        self.assertEqual(answer["control"], "ask")
+        self.assertEqual(answer["target"], "privacy_review")
+        self.assertEqual(answer["content_scope"]["mode"], "summary")
+
+    def test_duration_ambiguity_asks_user_with_redacted_scope(self):
+        records = [
+            {"id": "r1", "type": "resolved_target", "value": "legal_review"},
+            {"id": "r2", "type": "duration_ambiguous", "value": "temporary_or_always"},
+            {"id": "r3", "type": "session_share_policy", "value": "strict"},
+        ]
+        prompt = "단, 마지막 문장에서 대상이나 전제 조건이 바뀌었는지 아직 확인되지 않았다고 명시했다."
+        answer = FinalHarness().answer_task(make_task(records=records, prompt=prompt), {})
+        self.assertEqual(answer["control"], "ask")
+        self.assertEqual(answer["target"], "user")
+        self.assertEqual(answer["content_scope"]["mode"], "redacted")
+        self.assertIn("raw_quote", answer["content_scope"]["excluded_fields"])
+
+    def test_ambiguous_focal_confirmation_keeps_resolved_external_target(self):
+        records = [
+            {"id": "r1", "type": "resolved_target", "value": "audit_vendor"},
+            {"id": "r2", "type": "ambiguous_focal", "value": "multiple_focal_candidates_present"},
+            {"id": "r3", "type": "session_share_policy", "value": "strict"},
+            {"id": "r4", "type": "route_candidate_snapshot", "value": "external_candidates_present"},
+            {"id": "r5", "type": "dispatch_authority_check", "value": "authority_incomplete"},
+            {"id": "r6", "type": "share_boundary_update", "value": "dispatch_blocked_until_binding"},
+        ]
+        history = [{"summary": "요약만 공유할 수 있어 보이더라도, 최종 수신처와 허용 범위가 아직 확정되지 않았으므로 먼저 확인한다."}]
+        answer = FinalHarness().answer_task(make_task(records=records, prompt="원본, 익명 요약, 사진 중 현재 요청에 맞는 자료를 골라줘.", history=history), {})
+        self.assertEqual(answer["control"], "ask")
+        self.assertEqual(answer["target"], "audit_vendor")
+        self.assertEqual(answer["content_scope"]["mode"], "redacted")
+
+    def test_summary_only_composite_plan_amends_minimal_disclosure(self):
+        records = [
+            {"id": "r1", "type": "resolved_target", "value": "privacy_review"},
+            {"id": "r2", "type": "session_share_policy", "value": "strict"},
+        ]
+        prompt = "회의 시간을 반영하고 요약본만 보낸 뒤 임시 알림 설정까지 정리해줘."
+        history = [
+            {"summary": "최근 동의와 보안 상태, 공유 범위 변경은 예전 허용보다 우선한다."},
+            {"summary": "검토 메모에는 masked_ref와 marker_epsilon가 보이지만 승인 표시가 남은 것은 marker_epsilon이다."},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records, prompt=prompt, history=history), {})
+        self.assertEqual(answer["control"], "amend")
+        self.assertEqual(answer["content_scope"]["mode"], "redacted")
 
     def test_prior_success_route_superseded_requires_security_review_confirmation(self):
         records = [

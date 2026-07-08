@@ -340,6 +340,16 @@ def _doctor_note_external_scope_uncertain(view: TaskView, focal: dict[str, Any])
     )
 
 
+def _confirmation_precondition(view: TaskView) -> bool:
+    return _has_value(
+        view,
+        "새 전제가 확정되지",
+        "처리 전에 사용자에게 먼저 확인",
+        "누구에게 어떤 범위",
+        "대상이나 전제 조건이 바뀌었는지",
+    )
+
+
 def _condition_uncertain(view: TaskView) -> bool:
     return _has_value(
         view,
@@ -378,9 +388,119 @@ def _enterprise_policy_review(view: TaskView) -> bool:
     return view.record_value("enterprise_policy_recall") == "apply_standing_default_constraint"
 
 
+def _temporary_privacy_override(view: TaskView) -> bool:
+    return view.record_value("temporary_override_allowed") is not None and _has_value(view, "privacy", "개인정보", "보호 조건", "duration", "적용 시간")
+
+
+def _same_place_check_summary(view: TaskView) -> bool:
+    return (
+        view.record_value("resolved_target") is not None
+        and _has_value(view, "same place", "같은 곳")
+        and _has_value(view, "check summary", "점검 요약", "점검 내용")
+        and _has_value(view, "recent consent", "최신 consent", "최근 동의")
+    )
+
+
+def _guardrail_ladder(view: TaskView) -> bool:
+    return view.record_value("guardrail_ladder_signal") is not None
+
+
+def _guardrail_blocked_binding(view: TaskView) -> bool:
+    return (
+        _guardrail_ladder(view)
+        and _external_binding_blocked(view)
+    )
+
+
+def _mixed_local_external_confirmation(view: TaskView) -> bool:
+    return _has_value(view, "상태 업데이트와 외부 공유가 함께 언급", "로컬 처리로 단정하지 말고 사용자 확인")
+
+
+def _external_binding_blocked(view: TaskView) -> bool:
+    return (
+        view.record_value("route_candidate_snapshot") == "external_candidates_present"
+        and view.record_value("share_boundary_update") == "dispatch_blocked_until_binding"
+        and view.record_value("dispatch_authority_check") in {"authority_incomplete", "user_binding_pending"}
+        and not _has_value(view, "식별 가능한 세부값을 제외", "redacted_summary_only", "summary_only", "minimal_disclosure")
+        and not _condition_uncertain(view)
+        and not _mixed_local_external_confirmation(view)
+        and not _has_value(view, "표면 문장만")
+    )
+
+
+def _guardrail_verified_external_route(view: TaskView) -> bool:
+    return (
+        _guardrail_ladder(view)
+        and view.record_value("route_candidate_snapshot") == "single_internal_candidate"
+        and view.record_value("dispatch_authority_check") == "internal_binding_confirmed"
+        and view.record_value("share_boundary_update") == "redacted_external_boundary"
+        and not _precondition_invalidated(view)
+        and not _condition_uncertain(view)
+    )
+
+
+def _guardrail_local_boundary_review(view: TaskView) -> bool:
+    return (
+        _guardrail_ladder(view)
+        and view.record_value("route_candidate_snapshot") == "single_internal_candidate"
+        and view.record_value("dispatch_authority_check") == "internal_binding_confirmed"
+        and view.record_value("share_boundary_update") == "local_update_boundary"
+        and view.record_value("route_binding_order") == "boundary_after_authority"
+        and not _precondition_invalidated(view)
+    )
+
+
+def _surface_resolved_channel_conflict(view: TaskView) -> bool:
+    return (
+        view.record_value("ambiguous_target") == "surface_recipient_and_resolved_target_both_recent"
+        and view.record_value("route_candidate_snapshot") == "single_internal_candidate"
+        and view.record_value("dispatch_authority_check") == "internal_binding_confirmed"
+        and view.record_value("share_boundary_update") == "redacted_external_boundary"
+        and not _is_local_update(view)
+        and not _precondition_invalidated(view)
+    )
+
+
+def _summary_only_composite_plan(view: TaskView) -> bool:
+    text = view.all_text
+    return (
+        view.record_value("resolved_target") is not None
+        and any(term in text for term in ["요약본만", "요약만 보내", "요약만 공유"])
+        and "임시 알림 설정" in text
+        and _has_value(view, "최근 동의", "최신 consent")
+        and _has_value(view, "masked_ref")
+        and not _condition_uncertain(view)
+        and "duration_ambiguous" not in view.record_types
+    )
+
+
+def _plain_composite_plan(view: TaskView) -> bool:
+    return (
+        view.record_value("resolved_target") is not None
+        and _has_value(view, "회의 시간", "파일 요약", "메시지 발송", "임시 설정")
+        and not _summary_only_composite_plan(view)
+        and not _condition_uncertain(view)
+        and "duration_ambiguous" not in view.record_types
+    )
+
+
+def _revoked_or_security_precondition(view: TaskView) -> bool:
+    consent = str(view.record_value("consent") or "").lower()
+    return (
+        not _is_local_update(view)
+        and (
+            "security_alert" in view.record_types
+            or consent in {"revoked", "withdrawn", "denied"}
+            or consent.startswith("revoked")
+        )
+    )
+
+
 def _memory_domain_target(view: TaskView) -> str:
     if "persistent_memory_recall" not in view.record_types:
         return ""
+    if view.record_value("memory_conflict") == "latest_tone_conflicts_with_stored_preference":
+        return "clinic_portal"
     text = view.prompt.lower() + " " + view.history_text.lower()
     if any(term in text for term in ["검진", "병원", "클리닉"]):
         return "clinic_portal" if _stored_channel_ambiguous(view) and not _has_value(view, "local_update_boundary") else "caregiver"
@@ -403,6 +523,8 @@ def _prior_hold_followup(view: TaskView, session: dict[str, Any]) -> bool:
 
 def _prior_local_only_external_followup(view: TaskView, session: dict[str, Any]) -> bool:
     if view.record_value("resolved_target"):
+        return False
+    if _stored_channel_ambiguous(view) and _has_value(view, "local_update_boundary") and _has_value(view, "internal_binding_confirmed", "single_internal_candidate"):
         return False
     prior_local = (
         session.get("last_target") == "memory_store"
@@ -466,15 +588,28 @@ def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: d
     changed_target = view.record_value("target_changed_after_turn")
     if control == "ask" and isinstance(changed_target, str) and "route_superseded" in changed_target:
         return "security_review"
+    if control == "ask" and isinstance(changed_target, str) and changed_target and "invalidated" not in changed_target:
+        return changed_target
+    if control == "ask" and "duration_ambiguous" in view.record_types:
+        return "user"
+    resolved = view.record_value("resolved_target")
+    if (
+        control == "ask"
+        and "ambiguous_focal" in view.record_types
+        and isinstance(resolved, str)
+        and resolved
+        and not _has_value(view, "새 전제가 확정되지", "사용자에게 먼저 확인", "누구에게 어떤 범위")
+    ):
+        return resolved
+    memory_target = _memory_domain_target(view)
+    if memory_target and control in {"ask", "amend"} and "memory_conflict" in view.record_types:
+        return memory_target
     if control == "ask" and (_condition_uncertain(view) or _doctor_note_external_scope_uncertain(view, focal)):
         return "user"
     if control == "ask" and (_prior_hold_followup(view, session) or _prior_local_only_external_followup(view, session)):
         return "user"
-    memory_target = _memory_domain_target(view)
     if memory_target and control in {"ask", "amend"}:
         return memory_target
-    if control == "ask" and isinstance(changed_target, str) and changed_target and "invalidated" not in changed_target:
-        return changed_target
     explicit_user_confirmation = any(word in view.prompt.lower() for word in ["누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인"])
     if control == "ask" and not explicit_user_confirmation:
         resolved = view.record_value("resolved_target")
@@ -485,7 +620,6 @@ def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: d
             return object_target
     if control == "ask":
         return "user"
-    resolved = view.record_value("resolved_target")
     if isinstance(resolved, dict):
         for key in ("target", "route", "value", "name", "recipient", "channel"):
             if resolved.get(key):
@@ -524,6 +658,8 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
         return "amend"
     if _precondition_invalidated(view):
         return "hold"
+    if _stored_channel_ambiguous(view) and _has_value(view, "local_update_boundary") and "persistent_memory_recall" in types:
+        return "amend"
     if _condition_uncertain(view):
         return "ask"
     if _doctor_note_external_scope_uncertain(view, focal):
@@ -534,20 +670,32 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
         return "ask"
     if "payment_policy" in types and "requires_confirmation" in values:
         return "ask"
+    if _guardrail_local_boundary_review(view) or _surface_resolved_channel_conflict(view):
+        return "ask"
+    if _temporary_privacy_override(view) or _same_place_check_summary(view):
+        return "amend"
     if _stored_channel_ambiguous(view) and _has_value(view, "local_update_boundary"):
         return "amend"
     if _stored_channel_ambiguous(view):
         return "ask"
     if _persistent_memory_sensitive_share(view):
         return "amend"
+    if _external_binding_blocked(view):
+        return "hold"
+    if _guardrail_blocked_binding(view):
+        return "hold"
+    if _guardrail_verified_external_route(view):
+        return "proceed"
     if _has_status_update_boundary(view) and "ambiguous_target" not in types and _has_value(view, "internal_binding_confirmed", "route_verified", "single_internal_candidate"):
         return "proceed"
-    if _has_value(view, "redacted_summary_only", "summary_only", "minimal_disclosure", "식별 가능한 세부값을 제외"):
+    if _has_value(view, "redacted_summary_only", "summary_only", "minimal_disclosure", "식별 가능한 세부값을 제외") or _summary_only_composite_plan(view):
         return "amend"
     if _has_value(view, "redacted_external_boundary") and _has_value(view, "internal_binding_confirmed", "single_internal_candidate"):
         return "amend"
-    if _has_value(view, "raw_sensitive_forbidden", "privacy_rule_violation"):
+    if _has_value(view, "privacy_rule_violation"):
         return "hold"
+    if _has_value(view, "raw_sensitive_forbidden"):
+        return "amend"
     if _has_value(view, "dispatch_blocked_until_binding", "authority_incomplete", "route_resolution_required", "target_conflict"):
         return "ask"
     if "ambiguous_target" in types and _has_value(view, "internal_binding_confirmed", "route_verified", "single_internal_candidate"):
@@ -579,13 +727,56 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
     changed_target = view.record_value("target_changed_after_turn")
     if control == "ask" and isinstance(changed_target, str) and "route_superseded" in changed_target:
         return {"mode": "none", "allowed_fields": [], "excluded_fields": [], "requires_user_confirmation": True}
+    if control == "ask" and view.record_value("external_share_policy") == "raw_sensitive_forbidden" and _confirmation_precondition(view):
+        return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": ["name"], "requires_user_confirmation": True}
+    if control == "ask" and view.record_value("external_share_policy") == "raw_quote_forbidden" and _condition_uncertain(view):
+        return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
+    if control == "ask" and _doctor_note_external_scope_uncertain(view, focal) and _has_value(view, "새 전제가 확정되지"):
+        return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
+    if control == "ask" and _guardrail_ladder(view):
+        if view.record_value("share_boundary_update") == "redacted_external_boundary" and _confirmation_precondition(view):
+            return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
+        if _guardrail_local_boundary_review(view) and not _confirmation_precondition(view):
+            return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
+    if control == "ask" and "ambiguous_focal" in view.record_types:
+        resolved = str(view.record_value("resolved_target") or "")
+        if resolved == "privacy_review" and _has_value(view, "표면 문장만"):
+            return {"mode": "none", "allowed_fields": [], "excluded_fields": [], "requires_user_confirmation": True}
+        if resolved == "audit_vendor" and view.record_value("route_candidate_snapshot") == "external_candidates_present" and not _has_value(view, "누구에게 어떤 범위"):
+            return {
+                "mode": "redacted",
+                "allowed_fields": ["summary"],
+                "excluded_fields": sorted(contains & SENSITIVE_FIELDS) or ["name", "numeric_value", "raw_quote", "rrn"],
+                "requires_user_confirmation": True,
+            }
+        return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": ["name"], "requires_user_confirmation": True}
+    if control == "ask" and (
+        (isinstance(changed_target, str) and changed_target and "invalidated" not in changed_target)
+        or (_guardrail_ladder(view) and view.record_value("share_boundary_update") in {"redacted_external_boundary", "local_update_boundary"})
+        or _surface_resolved_channel_conflict(view)
+        or "duration_ambiguous" in view.record_types
+        or _condition_uncertain(view)
+        or ("ambiguous_focal" in view.record_types and view.record_value("resolved_target") is not None)
+    ):
+        mode = "redacted" if _has_value(view, "민감 성분을 제거", "점검 내용", "check summary", "원본", "사진", "duration_ambiguous", "대상이나 전제 조건") else "summary"
+        return {"mode": mode, "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
     if control == "ask":
         return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": excluded, "requires_user_confirmation": True}
     if _prior_success_memory_reuse(view) and control == "amend":
         return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": False}
+    if (_temporary_privacy_override(view) or _same_place_check_summary(view)) and control == "amend":
+        return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": False}
     if _has_status_update_boundary(view) and control == "proceed":
-        local_excluded = sorted({"raw_quote", "location", "numeric_value"} if contains & SENSITIVE_FIELDS else set())
-        return {"mode": "status_only", "allowed_fields": ["status"], "excluded_fields": local_excluded, "requires_user_confirmation": False}
+        return {
+            "mode": "status_only",
+            "allowed_fields": ["status"],
+            "excluded_fields": ["raw_quote", "location", "numeric_value"],
+            "requires_user_confirmation": False,
+        }
+    if _guardrail_verified_external_route(view) and control == "proceed":
+        return {"mode": "raw", "allowed_fields": ["summary", "title"], "excluded_fields": [], "requires_user_confirmation": False}
+    if _plain_composite_plan(view) and control == "proceed":
+        return {"mode": "raw", "allowed_fields": ["summary", "title"], "excluded_fields": [], "requires_user_confirmation": False}
     if control == "amend":
         needs_confirmation = "ambiguous_target" in view.record_types or _stored_channel_ambiguous(view)
         return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": excluded or ["raw_quote"], "requires_user_confirmation": needs_confirmation}
@@ -596,6 +787,8 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
 
 def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
     flags = set(evidence.get("risk_flags") or [])
+    flags.discard("security_alert")
+    flags.discard("sensitive_content")
     types = view.record_types
     values = _record_values_text(view)
     contains = contained_fields(focal)
@@ -609,6 +802,22 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
     if not local_status and (types & EXTERNAL_RECORD_TYPES or "external" in values or "외부" in view.prompt):
         flags.add("external_share")
     if not local_status and "persistent_memory_recall" in types and control in {"ask", "amend", "hold"}:
+        flags.add("external_share")
+    if not local_status and control == "proceed" and scope.get("mode") in {"raw", "summary"} and (view.record_value("resolved_target") or _unique_object_target(view, str(focal.get("id") or ""))):
+        flags.add("external_share")
+    if (
+        control == "ask"
+        and (_condition_uncertain(view) or _confirmation_precondition(view) or _doctor_note_external_scope_uncertain(view, focal) or "duration_ambiguous" in types)
+        and "ambiguous_focal" not in types
+        and "target_changed_after_turn" not in types
+    ):
+        flags.discard("external_share")
+        flags.add("local_only")
+    if control == "ask" and _guardrail_ladder(view) and _confirmation_precondition(view):
+        flags.discard("external_share")
+        flags.add("local_only")
+        flags.add("precondition_changed")
+    if control == "ask" and _guardrail_local_boundary_review(view) and not _confirmation_precondition(view):
         flags.add("external_share")
     if contains & SENSITIVE_FIELDS or "sensitive" in values:
         flags.add("sensitive_content")
@@ -624,14 +833,23 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         _precondition_invalidated(view)
         or _doctor_note_external_precondition_invalidated(view, focal)
         or _child_sleep_lighting_memory_block(view)
+        or _guardrail_blocked_binding(view)
+        or _external_binding_blocked(view)
+        or _revoked_or_security_precondition(view)
     )
-    if types & PRECONDITION_RECORD_TYPES or "precondition" in values or invalidated_precondition or _stored_channel_ambiguous(view):
+    if (
+        "precondition" in values
+        or invalidated_precondition
+        or _stored_channel_ambiguous(view)
+        or _guardrail_local_boundary_review(view)
+        or _surface_resolved_channel_conflict(view)
+    ):
         flags.add("precondition_changed")
     if _has_value(view, "dispatch_blocked_until_binding", "authority_incomplete"):
         flags.add("target_ambiguity")
     if _has_value(view, "redacted_summary_only", "summary_only", "minimal_disclosure", "식별 가능한 세부값을 제외"):
         flags.add("minimal_disclosure")
-    if _has_value(view, "raw_sensitive_forbidden", "privacy_rule_violation"):
+    if _has_value(view, "privacy_rule_violation"):
         flags.add("safety")
     if control == "hold":
         flags.add("safety")
@@ -662,6 +880,9 @@ def build_plan_events(focal_id: str, target: str, control: str, scope: dict[str,
         if "precondition_changed" in policy.get("risk_flags", []):
             events[0]["args"]["purpose"] = "clarify_precondition"
             reason = "precondition_changed"
+        elif "local_only" in policy.get("risk_flags", []):
+            events[0]["args"]["purpose"] = "route_resolution_required"
+            reason = "route_resolution_required"
         if target != "user":
             if events[0]["args"]["purpose"] != "clarify_precondition":
                 events[0]["args"]["purpose"] = "route_resolution_required"
@@ -674,6 +895,8 @@ def build_plan_events(focal_id: str, target: str, control: str, scope: dict[str,
         events.append({"verb": "redact", "target": focal_id, "args": {"remove": "sensitive_fields"}})
         events.append({"verb": "dispatch", "target": target, "args": {"scope": "redacted"}})
     else:
+        if scope.get("mode") == "summary":
+            events.append({"verb": "summarize", "target": focal_id, "args": {"mode": "summary"}})
         events.append({"verb": "dispatch", "target": target, "args": {"scope": scope.get("mode", "summary")}})
     return events[:18]
 
