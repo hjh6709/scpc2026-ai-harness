@@ -361,6 +361,7 @@ def _condition_uncertain(view: TaskView) -> bool:
         "결론을 내릴 수 없",
         "허용 범위가 아직 확정되지",
         "확정 정보가 없",
+        "확정되지",
     )
 
 
