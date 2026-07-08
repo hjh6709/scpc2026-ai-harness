@@ -281,6 +281,60 @@ def _has_value(view: TaskView, *needles: str) -> bool:
     return any(needle.lower() in values for needle in needles)
 
 
+def _precondition_invalidated(view: TaskView) -> bool:
+    return _has_value(
+        view,
+        "취소된",
+        "더 진행하면 안 된다",
+        "전제가 사라",
+        "실행하면 안 된다",
+        "precondition_invalidated",
+        "prior_success_invalidated",
+        "허용 근거가",
+        "깨졌으므로",
+        "멈춰야 한다",
+        "과거 승인에 기대면 안 되는 상태",
+        "실행을 막아야",
+        "전제를 무효화",
+        "이전 허용의 전제",
+    )
+
+
+def _condition_uncertain(view: TaskView) -> bool:
+    return _has_value(
+        view,
+        "조건 변경 여부가 미확정",
+        "현재 정보만으로는 결론",
+        "최종 수신처와 허용 범위가 아직 확정되지",
+        "허용 범위가 아직 확정되지",
+    )
+
+
+def _stored_channel_ambiguous(view: TaskView) -> bool:
+    return "ambiguous_target" in view.record_types and _has_value(view, "stored_channel_or_visible_recipient")
+
+
+def _persistent_memory_sensitive_share(view: TaskView) -> bool:
+    return "persistent_memory_recall" in view.record_types and _has_value(
+        view,
+        "위치나 나이",
+        "민감 내용",
+        "민감한 내용",
+        "민감 내용은 알아서",
+    )
+
+
+def _memory_domain_target(view: TaskView) -> str:
+    if "persistent_memory_recall" not in view.record_types:
+        return ""
+    text = view.prompt.lower() + " " + view.history_text.lower()
+    if any(term in text for term in ["검진", "병원", "클리닉"]):
+        return "clinic_portal" if _stored_channel_ambiguous(view) and not _has_value(view, "local_update_boundary") else "caregiver"
+    if any(term in text for term in ["생일 준비", "선물 준비"]):
+        return "caregiver"
+    return ""
+
+
 def _is_local_update(view: TaskView) -> bool:
     values = _record_values_text(view)
     prompt = view.prompt.lower() + " " + view.history_text.lower()
@@ -323,6 +377,13 @@ def _unique_object_target(view: TaskView, focal_id: str = "") -> str:
 def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: dict[str, Any]) -> str:
     if _is_local_update(view):
         return "memory_store"
+    if control == "hold" and _precondition_invalidated(view):
+        return "user"
+    if control == "ask" and _condition_uncertain(view):
+        return "user"
+    memory_target = _memory_domain_target(view)
+    if memory_target and control in {"ask", "amend"}:
+        return memory_target
     changed_target = view.record_value("target_changed_after_turn")
     if control == "ask" and isinstance(changed_target, str) and "route_superseded" in changed_target:
         return "security_review"
@@ -370,12 +431,20 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
         return "ask"
     if "consent" in types and any(word in values for word in ["revoked", "withdraw", "denied", "철회", "거부"]):
         return "hold"
-    if _has_value(view, "취소된", "더 진행하면 안 된다", "전제가 사라", "실행하면 안 된다", "precondition_invalidated", "prior_success_invalidated"):
+    if _precondition_invalidated(view):
         return "hold"
+    if _condition_uncertain(view):
+        return "ask"
     if any(word in prompt for word in ["다시 확인", "누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인"]):
         return "ask"
     if "payment_policy" in types and "requires_confirmation" in values:
         return "ask"
+    if _stored_channel_ambiguous(view) and _has_value(view, "local_update_boundary"):
+        return "amend"
+    if _stored_channel_ambiguous(view):
+        return "ask"
+    if _persistent_memory_sensitive_share(view):
+        return "amend"
     if _has_status_update_boundary(view) and "ambiguous_target" not in types and _has_value(view, "internal_binding_confirmed", "route_verified", "single_internal_candidate"):
         return "proceed"
     if _has_value(view, "redacted_summary_only", "summary_only", "minimal_disclosure", "식별 가능한 세부값을 제외"):
@@ -414,11 +483,12 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
         return {"mode": "none", "allowed_fields": [], "excluded_fields": [], "requires_user_confirmation": False}
     if control == "ask":
         return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": excluded, "requires_user_confirmation": True}
-    if _has_status_update_boundary(view):
+    if _has_status_update_boundary(view) and control == "proceed":
         local_excluded = sorted({"raw_quote", "location", "numeric_value"} if contains & SENSITIVE_FIELDS else set())
         return {"mode": "status_only", "allowed_fields": ["status"], "excluded_fields": local_excluded, "requires_user_confirmation": False}
     if control == "amend":
-        return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": excluded or ["raw_quote"], "requires_user_confirmation": False}
+        needs_confirmation = "ambiguous_target" in view.record_types or _stored_channel_ambiguous(view)
+        return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": excluded or ["raw_quote"], "requires_user_confirmation": needs_confirmation}
     if "raw" in _record_values_text(view) and not excluded:
         return {"mode": "raw", "allowed_fields": ["raw"], "excluded_fields": [], "requires_user_confirmation": False}
     return {"mode": "summary", "allowed_fields": ["summary", "status"], "excluded_fields": excluded, "requires_user_confirmation": False}
@@ -438,6 +508,8 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         flags.add("local_only")
     if not local_status and (types & EXTERNAL_RECORD_TYPES or "external" in values or "외부" in view.prompt):
         flags.add("external_share")
+    if not local_status and "persistent_memory_recall" in types and control in {"ask", "amend", "hold"}:
+        flags.add("external_share")
     if contains & SENSITIVE_FIELDS or "sensitive" in values:
         flags.add("sensitive_content")
     if "ambiguous_target" in types:
@@ -448,7 +520,8 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         flags.add("clarification_required")
     if control == "amend" or scope.get("mode") == "redacted":
         flags.add("minimal_disclosure")
-    if types & PRECONDITION_RECORD_TYPES or "precondition" in values:
+    invalidated_precondition = _precondition_invalidated(view)
+    if types & PRECONDITION_RECORD_TYPES or "precondition" in values or invalidated_precondition or _stored_channel_ambiguous(view):
         flags.add("precondition_changed")
     if _has_value(view, "dispatch_blocked_until_binding", "authority_incomplete"):
         flags.add("target_ambiguity")
@@ -459,7 +532,7 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
     if control == "hold":
         flags.add("safety")
     violations: set[str] = set()
-    if control == "hold" and ("precondition" in values or "취소" in view.history_text or "취소" in view.prompt or types & PRECONDITION_RECORD_TYPES):
+    if control == "hold" and ("precondition" in values or invalidated_precondition or "취소" in view.history_text or "취소" in view.prompt or types & PRECONDITION_RECORD_TYPES):
         flags.add("precondition_invalidated")
         violations.add("precondition_changed_ignored")
     requires_confirmation = control == "ask" or (control != "hold" and ("ambiguous_target" in types or "precondition" in values))
@@ -482,10 +555,13 @@ def build_plan_events(focal_id: str, target: str, control: str, scope: dict[str,
     events = [{"verb": "read", "target": focal_id, "args": {"purpose": read_purpose}}]
     if control == "ask":
         reason = "target_ambiguity" if "target_ambiguity" in policy.get("risk_flags", []) else "clarification_required"
+        if "precondition_changed" in policy.get("risk_flags", []):
+            events[0]["args"]["purpose"] = "clarify_precondition"
+            reason = "precondition_changed"
         if target != "user":
-            read_purpose = "route_resolution_required"
-            events[0]["args"]["purpose"] = read_purpose
-            reason = "route_resolution_required"
+            if events[0]["args"]["purpose"] != "clarify_precondition":
+                events[0]["args"]["purpose"] = "route_resolution_required"
+                reason = "route_resolution_required"
         events.append({"verb": "clarify", "target": "user", "args": {"reason": reason}})
     elif scope.get("mode") == "status_only":
         events.append({"verb": "verify", "target": "share_boundary_update", "args": {"scope": "local_update"}})
