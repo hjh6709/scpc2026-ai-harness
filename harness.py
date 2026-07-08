@@ -117,14 +117,12 @@ class FinalHarness:
         view = TaskView(task)
         focal = choose_focal(view)
         focal_id = str(focal.get("id") or "")
-        control = decide_control(view, focal, evidence)
+        control = decide_control(view, focal, evidence, session)
         target = infer_target(view, focal, control, session)
         scope = build_content_scope(view, focal, control, evidence)
         policy = build_policy(view, focal, control, scope, evidence)
         plan_events = build_plan_events(focal_id, target, control, scope, policy)
-        session["last_focal_id"] = focal_id
-        session["last_target"] = target
-        session["last_control"] = control
+        update_session_state(view, session, focal_id, target, control, scope, policy)
         update_session_memory(view, session, self.user_memory)
         return {
             "focal_id": focal_id,
@@ -300,6 +298,40 @@ def _precondition_invalidated(view: TaskView) -> bool:
     )
 
 
+def _doctor_note_external_precondition_invalidated(view: TaskView, focal: dict[str, Any]) -> bool:
+    if _doctor_note_external_scope_uncertain(view, focal):
+        return False
+    attrs = focal.get("attrs") or {}
+    raw_fields = set()
+    for key in ("contains", "fields"):
+        values = attrs.get(key)
+        if isinstance(values, list):
+            raw_fields.update(str(item) for item in values)
+    return (
+        str(focal.get("type") or "") == "health_record"
+        and ("doctor_note" in raw_fields or "raw_quote" in contained_fields(focal))
+        and view.record_value("external_share_policy") == "doctor_note_forbidden"
+        and not _is_local_update(view)
+        and not _condition_uncertain(view)
+    )
+
+
+def _doctor_note_external_scope_uncertain(view: TaskView, focal: dict[str, Any]) -> bool:
+    attrs = focal.get("attrs") or {}
+    raw_fields = set()
+    for key in ("contains", "fields"):
+        values = attrs.get(key)
+        if isinstance(values, list):
+            raw_fields.update(str(item) for item in values)
+    return (
+        str(focal.get("type") or "") == "health_record"
+        and ("doctor_note" in raw_fields or "raw_quote" in contained_fields(focal))
+        and view.record_value("external_share_policy") == "doctor_note_forbidden"
+        and not _is_local_update(view)
+        and _has_value(view, "새 전제가 확정되지", "누구에게 어떤 범위로 처리할지 다시 확인")
+    )
+
+
 def _condition_uncertain(view: TaskView) -> bool:
     return _has_value(
         view,
@@ -333,6 +365,30 @@ def _memory_domain_target(view: TaskView) -> str:
     if any(term in text for term in ["생일 준비", "선물 준비"]):
         return "caregiver"
     return ""
+
+
+def _same_context_followup(view: TaskView) -> bool:
+    return _has_value(view, "그대로 진행", "이전 요청 그대로", "같은 곳", "방금 내용", "지난번 방식", "같은 방식")
+
+
+def _direct_reuse_followup(view: TaskView) -> bool:
+    return _has_value(view, "그대로 진행", "이전 요청 그대로", "지난번 방식", "같은 방식")
+
+
+def _prior_hold_followup(view: TaskView, session: dict[str, Any]) -> bool:
+    return session.get("last_control") == "hold" and _direct_reuse_followup(view)
+
+
+def _prior_local_only_external_followup(view: TaskView, session: dict[str, Any]) -> bool:
+    if view.record_value("resolved_target"):
+        return False
+    prior_local = (
+        session.get("last_target") == "memory_store"
+        or session.get("last_scope_mode") == "status_only"
+        or "local_only" in set(session.get("last_risk_flags") or [])
+    )
+    wants_external = _has_value(view, "보내", "공유", "전달", "dispatch")
+    return prior_local and wants_external and not _is_local_update(view)
 
 
 def _is_local_update(view: TaskView) -> bool:
@@ -379,7 +435,9 @@ def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: d
         return "memory_store"
     if control == "hold" and _precondition_invalidated(view):
         return "user"
-    if control == "ask" and _condition_uncertain(view):
+    if control == "ask" and (_condition_uncertain(view) or _doctor_note_external_scope_uncertain(view, focal)):
+        return "user"
+    if control == "ask" and (_prior_hold_followup(view, session) or _prior_local_only_external_followup(view, session)):
         return "user"
     memory_target = _memory_domain_target(view)
     if memory_target and control in {"ask", "amend"}:
@@ -413,14 +471,17 @@ def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: d
     return str(session.get("last_target") or "user")
 
 
-def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, Any]) -> str:
+def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, Any], session: dict[str, Any] | None = None) -> str:
+    session = session or {}
     types = view.record_types
     values = _record_values_text(view)
     prompt = view.prompt.lower()
-    if {"security_alert", "safety_mode"} & types or "phishing" in values or "피싱" in values or "impersonation" in values:
-        return "hold"
     if _is_local_update(view):
         return "proceed"
+    if {"security_alert", "safety_mode"} & types or "phishing" in values or "피싱" in values or "impersonation" in values:
+        return "hold"
+    if _prior_hold_followup(view, session) or _prior_local_only_external_followup(view, session):
+        return "ask"
     if "privacy_guard" in types:
         return "hold"
     if "target_changed_after_turn" in types and "route_superseded" in values:
@@ -435,6 +496,10 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
         return "hold"
     if _condition_uncertain(view):
         return "ask"
+    if _doctor_note_external_scope_uncertain(view, focal):
+        return "ask"
+    if _doctor_note_external_precondition_invalidated(view, focal):
+        return "hold"
     if any(word in prompt for word in ["다시 확인", "누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인"]):
         return "ask"
     if "payment_policy" in types and "requires_confirmation" in values:
@@ -461,7 +526,7 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
         return "ask"
     if types & ASK_RECORD_TYPES:
         return "ask"
-    if types & EXTERNAL_RECORD_TYPES or evidence.get("requires_redaction") or contained_fields(focal) & SENSITIVE_FIELDS:
+    if types & EXTERNAL_RECORD_TYPES or contained_fields(focal) & SENSITIVE_FIELDS:
         return "amend"
     return "proceed"
 
@@ -520,7 +585,7 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         flags.add("clarification_required")
     if control == "amend" or scope.get("mode") == "redacted":
         flags.add("minimal_disclosure")
-    invalidated_precondition = _precondition_invalidated(view)
+    invalidated_precondition = _precondition_invalidated(view) or _doctor_note_external_precondition_invalidated(view, focal)
     if types & PRECONDITION_RECORD_TYPES or "precondition" in values or invalidated_precondition or _stored_channel_ambiguous(view):
         flags.add("precondition_changed")
     if _has_value(view, "dispatch_blocked_until_binding", "authority_incomplete"):
@@ -576,12 +641,36 @@ def build_plan_events(focal_id: str, target: str, control: str, scope: dict[str,
 
 def user_response(control: str, target: str, scope: dict[str, Any]) -> str:
     if control == "hold":
-        return "정책 또는 안전 조건 때문에 진행하지 않습니다."
+        return "I will not proceed because a policy or safety condition blocks this request."
     if control == "ask":
-        return "대상 또는 범위 확인이 필요합니다."
+        return "I need confirmation about the target or scope before proceeding."
     if control == "amend":
-        return f"민감 정보를 제외하고 {target}(으)로 진행합니다."
-    return f"{target}(으)로 진행합니다."
+        return f"I will proceed to {target} after excluding sensitive information."
+    return f"I will proceed to {target}."
+
+
+def update_session_state(
+    view: TaskView,
+    session: dict[str, Any],
+    focal_id: str,
+    target: str,
+    control: str,
+    scope: dict[str, Any],
+    policy: dict[str, Any],
+) -> None:
+    session["last_focal_id"] = focal_id
+    session["last_target"] = target
+    session["last_control"] = control
+    session["last_scope_mode"] = str(scope.get("mode") or "")
+    session["last_risk_flags"] = list(policy.get("risk_flags") or [])
+    session["last_requires_confirmation"] = bool(policy.get("requires_confirmation"))
+    share_boundary = view.record_value("share_boundary_update")
+    if isinstance(share_boundary, str) and share_boundary:
+        session["share_boundary"] = share_boundary
+    authority = view.record_value("dispatch_authority_check")
+    if isinstance(authority, str) and authority:
+        session["route_authority"] = authority
+    session["route_confirmed"] = _has_value(view, "internal_binding_confirmed", "route_verified", "single_internal_candidate")
 
 
 def update_session_memory(view: TaskView, session: dict[str, Any], user_memory: dict[str, Any]) -> None:
@@ -695,7 +784,7 @@ def write_submission_csv(payload: dict[str, Any], output_path: str | Path) -> No
     validate_payload(payload)
     path = Path(output_path)
     with path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["submission"])
+        writer = csv.DictWriter(f, fieldnames=["submission"], lineterminator="\n")
         writer.writeheader()
         writer.writerow({"submission": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))})
 

@@ -45,6 +45,7 @@ class HarnessInterfaceTests(unittest.TestCase):
         self.assertIn(answer["control"], {"proceed", "amend", "hold", "ask"})
         self.assertIsInstance(answer["plan_events"], list)
         self.assertLessEqual(len(answer["plan_events"]), 18)
+        self.assertTrue(all(ord(ch) < 128 for ch in answer["user_response"]))
 
     def test_run_harness_metadata_uses_official_values(self):
         payload = run_harness([make_task()], harness_name="unit_test")
@@ -55,6 +56,168 @@ class HarnessInterfaceTests(unittest.TestCase):
         self.assertEqual(payload["meta"]["seed"], 42)
         self.assertFalse(payload["meta"]["uses_external_api"])
         self.assertEqual(set(payload["answers"]), {"task_1"})
+
+    def test_answer_task_records_structured_session_state(self):
+        session = {}
+        records = [
+            {"id": "r1", "type": "session_share_policy", "value": "strict"},
+            {"id": "r2", "type": "route_candidate_snapshot", "value": "single_internal_candidate"},
+            {"id": "r3", "type": "dispatch_authority_check", "value": "internal_binding_confirmed"},
+            {"id": "r4", "type": "share_boundary_update", "value": "local_update_boundary"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records), session)
+        self.assertEqual(session["last_scope_mode"], answer["content_scope"]["mode"])
+        self.assertEqual(session["last_risk_flags"], answer["policy"]["risk_flags"])
+        self.assertEqual(session["share_boundary"], "local_update_boundary")
+        self.assertTrue(session["route_confirmed"])
+
+    def test_prior_hold_followup_requires_confirmation(self):
+        harness = FinalHarness()
+        session = {}
+        first = make_task(records=[{"id": "r1", "type": "privacy_guard", "value": "privacy_rule"}], prompt="이 요청은 개인정보 보호 규칙 때문에 멈춰줘.")
+        first_answer = harness.answer_task(first, session)
+        self.assertEqual(first_answer["control"], "hold")
+
+        second = make_task(
+            task_id="task_2",
+            records=[{"id": "r2", "type": "session_share_policy", "value": "strict"}],
+            objects=[{"id": "obj_followup", "type": "message", "attrs": {"body": "이전 요청을 그대로 진행해줘.", "ref_code": "WM-2000"}}],
+            prompt="이전 요청 그대로 진행해줘.",
+        )
+        answer = harness.answer_task(second, session)
+        self.assertEqual(answer["control"], "ask")
+        self.assertEqual(answer["target"], "user")
+        self.assertTrue(answer["policy"]["requires_confirmation"])
+
+    def test_prior_local_only_followup_blocks_external_dispatch(self):
+        harness = FinalHarness()
+        session = {}
+        local_answer = harness.answer_task(make_task(prompt="바깥으로 보내지 말고 내부 상태 업데이트로 끝내줘"), session)
+        self.assertEqual(local_answer["target"], "memory_store")
+        self.assertEqual(local_answer["content_scope"]["mode"], "status_only")
+
+        external_task = make_task(
+            task_id="task_2",
+            records=[
+                {"id": "r1", "type": "session_share_policy", "value": "strict"},
+            ],
+            objects=[
+                {
+                    "id": "obj_file",
+                    "type": "file",
+                    "attrs": {"contains": ["summary", "raw_quote"], "ref_code": "WM-2000"},
+                }
+            ],
+            prompt="방금 내용은 같은 곳에 보내줘.",
+        )
+        answer = harness.answer_task(external_task, session)
+        self.assertEqual(answer["control"], "ask")
+        self.assertEqual(answer["target"], "user")
+
+    def test_health_doctor_note_forbidden_holds_external_share(self):
+        task = make_task(
+            records=[
+                {"id": "r1", "type": "current_request_hint", "value": "resolve focal object from prompt, object attrs, and latest records"},
+                {"id": "r2", "type": "resolved_target", "value": "fitness_coach"},
+                {"id": "r3", "type": "external_share_policy", "value": "doctor_note_forbidden"},
+                {"id": "r4", "type": "session_share_policy", "value": "strict"},
+            ],
+            objects=[
+                {
+                    "id": "health_today",
+                    "type": "health_record",
+                    "attrs": {"fields": ["status", "numeric_value", "doctor_note"], "status": "주의", "title": "오늘 건강 요약"},
+                }
+            ],
+            prompt="오늘 건강 기록을 공유해줘. 예전에 정한 공유 방식도 반영해줘.",
+            history=[
+                {"summary": "최신 consent, 보안 알림, 공유 범위가 과거 요청을 덮을 수 있다.", "turn": 3},
+            ],
+        )
+        answer = FinalHarness().answer_task(task, {})
+        self.assertEqual(answer["control"], "hold")
+        self.assertEqual(answer["content_scope"]["mode"], "none")
+        self.assertIn("precondition_invalidated", answer["policy"]["risk_flags"])
+        self.assertIn("precondition_changed_ignored", answer["policy"]["violations"])
+
+    def test_health_doctor_note_uncertain_scope_asks_before_hold(self):
+        task = make_task(
+            records=[
+                {"id": "r1", "type": "current_request_hint", "value": "resolve focal object from prompt, object attrs, and latest records"},
+                {"id": "r2", "type": "resolved_target", "value": "fitness_coach"},
+                {"id": "r3", "type": "external_share_policy", "value": "doctor_note_forbidden"},
+                {"id": "r4", "type": "session_share_policy", "value": "strict"},
+            ],
+            objects=[
+                {
+                    "id": "health_today",
+                    "type": "health_record",
+                    "attrs": {"fields": ["status", "numeric_value", "doctor_note"], "status": "주의", "title": "오늘 건강 요약"},
+                }
+            ],
+            prompt="오늘 건강 기록을 공유해줘. 예전에 정한 공유 방식도 반영해줘.",
+            history=[
+                {"summary": "단, 새 전제가 확정되지 않았으므로 처리 전에 사용자에게 먼저 확인해야 한다.", "turn": 4},
+                {"summary": "상태 업데이트와 외부 공유가 함께 언급되어 있으므로, 로컬 처리로 단정하지 말고 사용자 확인을 거친다.", "turn": 4},
+            ],
+        )
+        answer = FinalHarness().answer_task(task, {})
+        self.assertEqual(answer["control"], "ask")
+        self.assertEqual(answer["target"], "user")
+        self.assertTrue(answer["policy"]["requires_confirmation"])
+
+    def test_non_sensitive_focal_ignores_decoy_redaction_evidence(self):
+        task = make_task(
+            records=[
+                {"id": "r1", "type": "current_request_hint", "value": "resolve focal object from prompt, object attrs, and latest records"},
+                {"id": "r2", "type": "resolved_target", "value": "privacy_review"},
+                {"id": "r3", "type": "session_share_policy", "value": "strict"},
+            ],
+            objects=[
+                {
+                    "id": "obj_focal",
+                    "type": "message",
+                    "attrs": {"body": "회의 시간을 반영하고 요약본만 보내줘.", "recipient": "privacy_review", "ref_code": "WM-1000"},
+                },
+                {
+                    "id": "obj_decoy",
+                    "type": "file",
+                    "attrs": {"contains": ["summary", "raw_quote"], "title": "민감한 제외 후보", "ref_code": "WM-2000"},
+                },
+            ],
+            prompt="회의 시간, 파일 요약, 메시지 발송, 임시 설정 변경까지 하나의 계획으로 처리해줘.",
+            history=[
+                {"summary": "이번 요청의 후보 참조는 순서대로 WM-2000, WM-1000이다. 두 번째 후보만 현재 처리 대상으로 확정했다.", "turn": 3}
+            ],
+        )
+        answer = FinalHarness().answer_task(task, {})
+        self.assertEqual(answer["focal_id"], "obj_focal")
+        self.assertEqual(answer["control"], "proceed")
+
+    def test_latest_internal_update_overrides_security_alert(self):
+        task = make_task(
+            records=[
+                {"id": "r1", "type": "current_request_hint", "value": "resolve focal object from prompt, object attrs, and latest records"},
+                {"id": "r2", "type": "resolved_target", "value": "privacy_review"},
+                {"id": "r3", "type": "security_alert", "value": "recipient_impersonation_suspected"},
+                {"id": "r4", "type": "session_share_policy", "value": "strict"},
+            ],
+            objects=[
+                {
+                    "id": "obj_note",
+                    "type": "personal_note",
+                    "attrs": {"contains": ["summary", "raw_quote", "location", "numeric_value"], "ref_code": "WM-1000"},
+                }
+            ],
+            prompt="fast path를 무효화하는 신호가 있으면 우선해줘. 단, 수신처 전달 대신 기기 내부 업데이트만 수행하라는 조건이 마지막에 붙었다.",
+            history=[
+                {"summary": "단, 수신처 전달 대신 기기 내부 업데이트만 수행하라는 조건이 마지막에 붙었다.", "turn": 6}
+            ],
+        )
+        answer = FinalHarness().answer_task(task, {})
+        self.assertEqual(answer["control"], "proceed")
+        self.assertEqual(answer["target"], "memory_store")
+        self.assertEqual(answer["content_scope"]["mode"], "status_only")
 
     def test_validate_payload_rejects_control_plan_contradictions(self):
         def payload_for(answer):
@@ -121,6 +284,7 @@ class HarnessInterfaceTests(unittest.TestCase):
             self.assertEqual(list(rows[0]), ["submission"])
             parsed = json.loads(rows[0]["submission"])
             self.assertEqual(parsed["schema"], "scpc.final.answer.v1")
+            self.assertNotIn(b"\r\n", out.read_bytes())
 
     def test_focal_resolution_uses_marker_trace(self):
         objects = [
