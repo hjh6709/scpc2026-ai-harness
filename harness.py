@@ -515,8 +515,11 @@ def _prior_local_only_external_followup(view: TaskView, session: dict[str, Any])
     return prior_local and wants_external and not _is_local_update(view)
 
 
-LOCAL_UPDATE_NEGATION_TERMS = ("보내지 말고", "전달 대신", "동작은 취소", "공유하지 말고", "작업은 취소", "외부 공유가 아니라")
-LOCAL_UPDATE_SCOPE_TERMS = ("내부 상태", "내부 업데이트", "기기 내부", "기기 안", "상태만", "상태값만", "로컬 상태", "로컬")
+LOCAL_UPDATE_NEGATION_TERMS = (
+    "보내지 말고", "전달 대신", "동작은 취소", "공유하지 말고", "작업은 취소", "외부 공유가 아니라",
+    "전송을 하지 말고", "보내기는 접고", "넘기는 대신", "전달 단계는 빼고", "처리는 생략하고", "외부 전달", "외부 전송",
+)
+LOCAL_UPDATE_SCOPE_TERMS = ("내부", "기기 안", "장치 안", "상태", "로컬", "완료 상태")
 
 
 def _is_local_update(view: TaskView) -> bool:
