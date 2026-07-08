@@ -298,6 +298,14 @@ def _precondition_invalidated(view: TaskView) -> bool:
     )
 
 
+def _child_sleep_lighting_memory_block(view: TaskView) -> bool:
+    return (
+        "persistent_memory_recall" in view.record_types
+        and view.record_value("safety_mode") == "child_sleep_active"
+        and _has_value(view, "조명", "light", "lighting")
+    )
+
+
 def _doctor_note_external_precondition_invalidated(view: TaskView, focal: dict[str, Any]) -> bool:
     if _doctor_note_external_scope_uncertain(view, focal):
         return False
@@ -354,6 +362,20 @@ def _persistent_memory_sensitive_share(view: TaskView) -> bool:
         "민감한 내용",
         "민감 내용은 알아서",
     )
+
+
+def _prior_success_memory_reuse(view: TaskView) -> bool:
+    recall = view.record_value("persistent_memory_recall")
+    return (
+        isinstance(recall, dict)
+        and recall.get("memory_class") == "prior_result"
+        and view.record_value("ops_memory_recall") == "use_prior_success_and_failure_records"
+        and "target_changed_after_turn" not in view.record_types
+    )
+
+
+def _enterprise_policy_review(view: TaskView) -> bool:
+    return view.record_value("enterprise_policy_recall") == "apply_standing_default_constraint"
 
 
 def _memory_domain_target(view: TaskView) -> str:
@@ -433,8 +455,17 @@ def _unique_object_target(view: TaskView, focal_id: str = "") -> str:
 def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: dict[str, Any]) -> str:
     if _is_local_update(view):
         return "memory_store"
+    if _prior_success_memory_reuse(view) and control == "amend":
+        return "legal_review"
+    if _enterprise_policy_review(view) and control in {"amend", "ask", "hold"}:
+        return "privacy_review"
+    if control == "hold" and _child_sleep_lighting_memory_block(view):
+        return "living_room"
     if control == "hold" and _precondition_invalidated(view):
         return "user"
+    changed_target = view.record_value("target_changed_after_turn")
+    if control == "ask" and isinstance(changed_target, str) and "route_superseded" in changed_target:
+        return "security_review"
     if control == "ask" and (_condition_uncertain(view) or _doctor_note_external_scope_uncertain(view, focal)):
         return "user"
     if control == "ask" and (_prior_hold_followup(view, session) or _prior_local_only_external_followup(view, session)):
@@ -442,9 +473,6 @@ def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: d
     memory_target = _memory_domain_target(view)
     if memory_target and control in {"ask", "amend"}:
         return memory_target
-    changed_target = view.record_value("target_changed_after_turn")
-    if control == "ask" and isinstance(changed_target, str) and "route_superseded" in changed_target:
-        return "security_review"
     if control == "ask" and isinstance(changed_target, str) and changed_target and "invalidated" not in changed_target:
         return changed_target
     explicit_user_confirmation = any(word in view.prompt.lower() for word in ["누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인"])
@@ -492,6 +520,8 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
         return "ask"
     if "consent" in types and any(word in values for word in ["revoked", "withdraw", "denied", "철회", "거부"]):
         return "hold"
+    if _prior_success_memory_reuse(view):
+        return "amend"
     if _precondition_invalidated(view):
         return "hold"
     if _condition_uncertain(view):
@@ -546,8 +576,13 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
     excluded = sorted(contains & SENSITIVE_FIELDS)
     if control == "hold":
         return {"mode": "none", "allowed_fields": [], "excluded_fields": [], "requires_user_confirmation": False}
+    changed_target = view.record_value("target_changed_after_turn")
+    if control == "ask" and isinstance(changed_target, str) and "route_superseded" in changed_target:
+        return {"mode": "none", "allowed_fields": [], "excluded_fields": [], "requires_user_confirmation": True}
     if control == "ask":
         return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": excluded, "requires_user_confirmation": True}
+    if _prior_success_memory_reuse(view) and control == "amend":
+        return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": False}
     if _has_status_update_boundary(view) and control == "proceed":
         local_excluded = sorted({"raw_quote", "location", "numeric_value"} if contains & SENSITIVE_FIELDS else set())
         return {"mode": "status_only", "allowed_fields": ["status"], "excluded_fields": local_excluded, "requires_user_confirmation": False}
@@ -585,7 +620,11 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         flags.add("clarification_required")
     if control == "amend" or scope.get("mode") == "redacted":
         flags.add("minimal_disclosure")
-    invalidated_precondition = _precondition_invalidated(view) or _doctor_note_external_precondition_invalidated(view, focal)
+    invalidated_precondition = (
+        _precondition_invalidated(view)
+        or _doctor_note_external_precondition_invalidated(view, focal)
+        or _child_sleep_lighting_memory_block(view)
+    )
     if types & PRECONDITION_RECORD_TYPES or "precondition" in values or invalidated_precondition or _stored_channel_ambiguous(view):
         flags.add("precondition_changed")
     if _has_value(view, "dispatch_blocked_until_binding", "authority_incomplete"):
