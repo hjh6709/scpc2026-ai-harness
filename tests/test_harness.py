@@ -45,6 +45,7 @@ class HarnessInterfaceTests(unittest.TestCase):
         self.assertIn(answer["control"], {"proceed", "amend", "hold", "ask"})
         self.assertIsInstance(answer["plan_events"], list)
         self.assertLessEqual(len(answer["plan_events"]), 18)
+        self.assertTrue(all(ord(ch) < 128 for ch in answer["user_response"]))
 
     def test_run_harness_metadata_uses_official_values(self):
         payload = run_harness([make_task()], harness_name="unit_test")
@@ -55,6 +56,63 @@ class HarnessInterfaceTests(unittest.TestCase):
         self.assertEqual(payload["meta"]["seed"], 42)
         self.assertFalse(payload["meta"]["uses_external_api"])
         self.assertEqual(set(payload["answers"]), {"task_1"})
+
+    def test_answer_task_records_structured_session_state(self):
+        session = {}
+        records = [
+            {"id": "r1", "type": "session_share_policy", "value": "strict"},
+            {"id": "r2", "type": "route_candidate_snapshot", "value": "single_internal_candidate"},
+            {"id": "r3", "type": "dispatch_authority_check", "value": "internal_binding_confirmed"},
+            {"id": "r4", "type": "share_boundary_update", "value": "local_update_boundary"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records), session)
+        self.assertEqual(session["last_scope_mode"], answer["content_scope"]["mode"])
+        self.assertEqual(session["last_risk_flags"], answer["policy"]["risk_flags"])
+        self.assertEqual(session["share_boundary"], "local_update_boundary")
+        self.assertTrue(session["route_confirmed"])
+
+    def test_prior_hold_followup_requires_confirmation(self):
+        harness = FinalHarness()
+        session = {}
+        first = make_task(records=[{"id": "r1", "type": "privacy_guard", "value": "privacy_rule"}], prompt="이 요청은 개인정보 보호 규칙 때문에 멈춰줘.")
+        first_answer = harness.answer_task(first, session)
+        self.assertEqual(first_answer["control"], "hold")
+
+        second = make_task(
+            task_id="task_2",
+            records=[{"id": "r2", "type": "session_share_policy", "value": "strict"}],
+            objects=[{"id": "obj_followup", "type": "message", "attrs": {"body": "이전 요청을 그대로 진행해줘.", "ref_code": "WM-2000"}}],
+            prompt="이전 요청 그대로 진행해줘.",
+        )
+        answer = harness.answer_task(second, session)
+        self.assertEqual(answer["control"], "ask")
+        self.assertEqual(answer["target"], "user")
+        self.assertTrue(answer["policy"]["requires_confirmation"])
+
+    def test_prior_local_only_followup_blocks_external_dispatch(self):
+        harness = FinalHarness()
+        session = {}
+        local_answer = harness.answer_task(make_task(prompt="바깥으로 보내지 말고 내부 상태 업데이트로 끝내줘"), session)
+        self.assertEqual(local_answer["target"], "memory_store")
+        self.assertEqual(local_answer["content_scope"]["mode"], "status_only")
+
+        external_task = make_task(
+            task_id="task_2",
+            records=[
+                {"id": "r1", "type": "session_share_policy", "value": "strict"},
+            ],
+            objects=[
+                {
+                    "id": "obj_file",
+                    "type": "file",
+                    "attrs": {"contains": ["summary", "raw_quote"], "ref_code": "WM-2000"},
+                }
+            ],
+            prompt="방금 내용은 같은 곳에 보내줘.",
+        )
+        answer = harness.answer_task(external_task, session)
+        self.assertEqual(answer["control"], "ask")
+        self.assertEqual(answer["target"], "user")
 
     def test_validate_payload_rejects_control_plan_contradictions(self):
         def payload_for(answer):
@@ -121,6 +179,7 @@ class HarnessInterfaceTests(unittest.TestCase):
             self.assertEqual(list(rows[0]), ["submission"])
             parsed = json.loads(rows[0]["submission"])
             self.assertEqual(parsed["schema"], "scpc.final.answer.v1")
+            self.assertNotIn(b"\r\n", out.read_bytes())
 
     def test_focal_resolution_uses_marker_trace(self):
         objects = [
