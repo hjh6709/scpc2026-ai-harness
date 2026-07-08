@@ -290,8 +290,12 @@ def _precondition_invalidated(view: TaskView) -> bool:
         "precondition_invalidated",
         "prior_success_invalidated",
         "허용 근거",
+        "허용의 근거",
         "깨졌",
+        "깨뜨리",
         "멈춰야",
+        "믿을 수 없으므로",
+        "뒤집었으니",
         "기대면 안",
         "막아야",
         "전제를 무효화",
@@ -356,6 +360,7 @@ def _condition_uncertain(view: TaskView) -> bool:
         "미확정",
         "결론을 내릴 수 없",
         "허용 범위가 아직 확정되지",
+        "확정 정보가 없",
     )
 
 
@@ -656,7 +661,7 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
         return "ask"
     if _doctor_note_external_precondition_invalidated(view, focal):
         return "hold"
-    if any(word in prompt for word in ["다시 확인", "누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인"]):
+    if any(word in prompt for word in ["다시 확인", "누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인", "확인 질문", "clarification", "확인하지 않으면", "다시 물어봐"]):
         return "ask"
     if "payment_policy" in types and "requires_confirmation" in values:
         return "ask"
