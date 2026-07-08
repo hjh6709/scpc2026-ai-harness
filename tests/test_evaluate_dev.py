@@ -31,6 +31,7 @@ def answer(
         "plan_events": events
         or [
             {"verb": "read", "target": focal_id, "args": {"purpose": "inspect_task_context"}},
+            {"verb": "dispatch", "target": target, "args": {"scope": "summary"}},
         ],
     }
 
@@ -82,8 +83,18 @@ class DevScoringTests(unittest.TestCase):
         self.assertEqual(report["axes"]["plan"], 0.0)
 
     def test_plan_arg_aliases_are_canonicalized(self):
-        pred = answer(events=[{"verb": "read", "target": "obj_a", "args": {"purpose": "inspect_task_context"}}])
-        ref = answer(events=[{"verb": "read", "target": "obj_a", "args": {"purpose": "inspect_context"}}])
+        pred = answer(
+            events=[
+                {"verb": "read", "target": "obj_a", "args": {"purpose": "inspect_task_context"}},
+                {"verb": "dispatch", "target": "user", "args": {"scope": "summary"}},
+            ]
+        )
+        ref = answer(
+            events=[
+                {"verb": "read", "target": "obj_a", "args": {"purpose": "inspect_context"}},
+                {"verb": "dispatch", "target": "user", "args": {"scope": "summary"}},
+            ]
+        )
         ref["expected_events"] = ref["plan_events"]
         payload = {
             "schema": "scpc.final.answer.v1",

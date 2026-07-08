@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness import FinalHarness, load_jsonl, run_harness, write_submission_csv
+from harness import FinalHarness, load_jsonl, run_harness, validate_payload, write_submission_csv
 
 
 def make_task(task_id="task_1", records=None, objects=None, prompt="처리해줘", history=None):
@@ -55,6 +55,61 @@ class HarnessInterfaceTests(unittest.TestCase):
         self.assertEqual(payload["meta"]["seed"], 42)
         self.assertFalse(payload["meta"]["uses_external_api"])
         self.assertEqual(set(payload["answers"]), {"task_1"})
+
+    def test_validate_payload_rejects_control_plan_contradictions(self):
+        def payload_for(answer):
+            return {
+                "schema": "scpc.final.answer.v1",
+                "meta": {
+                    "fixed_slm_policy": "local_fixed_slm_only",
+                    "model_id": "scpc-final-fixed-slm-local-facade",
+                    "uses_external_api": False,
+                    "temperature": 0.0,
+                    "seed": 42,
+                },
+                "answers": {"task_1": answer},
+            }
+
+        valid_policy = {"risk_flags": [], "violations": [], "requires_confirmation": False}
+        with self.assertRaisesRegex(ValueError, "hold"):
+            validate_payload(
+                payload_for(
+                    {
+                        "focal_id": "obj_1",
+                        "target": "user",
+                        "control": "hold",
+                        "content_scope": {"mode": "none", "allowed_fields": [], "excluded_fields": [], "requires_user_confirmation": False},
+                        "policy": valid_policy,
+                        "plan_events": [{"verb": "dispatch", "target": "user", "args": {"scope": "summary"}}],
+                    }
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "ask"):
+            validate_payload(
+                payload_for(
+                    {
+                        "focal_id": "obj_1",
+                        "target": "user",
+                        "control": "ask",
+                        "content_scope": {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": [], "requires_user_confirmation": True},
+                        "policy": {"risk_flags": [], "violations": [], "requires_confirmation": True},
+                        "plan_events": [{"verb": "read", "target": "obj_1", "args": {"purpose": "inspect_context"}}],
+                    }
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "status_only"):
+            validate_payload(
+                payload_for(
+                    {
+                        "focal_id": "obj_1",
+                        "target": "memory_store",
+                        "control": "proceed",
+                        "content_scope": {"mode": "status_only", "allowed_fields": ["status"], "excluded_fields": [], "requires_user_confirmation": False},
+                        "policy": valid_policy,
+                        "plan_events": [{"verb": "read", "target": "obj_1", "args": {"purpose": "local_update"}}],
+                    }
+                )
+            )
 
     def test_write_submission_csv_round_trips_json(self):
         payload = run_harness([make_task()], harness_name="unit_test")

@@ -649,6 +649,46 @@ def validate_payload(payload: dict[str, Any], expected_ids: set[str] | None = No
             raise ValueError(f"{task_id} has invalid scope mode")
         if not isinstance(answer.get("plan_events"), list) or len(answer["plan_events"]) > 18:
             raise ValueError(f"{task_id} has invalid plan_events")
+        validate_answer_consistency(str(task_id), answer)
+
+
+def _event_verbs(answer: dict[str, Any]) -> set[str]:
+    return {str(event.get("verb")) for event in answer.get("plan_events") or [] if isinstance(event, dict)}
+
+
+def validate_answer_consistency(task_id: str, answer: dict[str, Any]) -> None:
+    control = answer.get("control")
+    scope = answer.get("content_scope") or {}
+    policy = answer.get("policy") or {}
+    verbs = _event_verbs(answer)
+
+    if control == "hold":
+        if scope.get("mode") != "none" or verbs & {"dispatch", "redact", "update", "clarify"} or "guard" not in verbs:
+            raise ValueError(f"{task_id} hold answer has contradictory scope or plan")
+        if policy.get("requires_confirmation") is True or scope.get("requires_user_confirmation") is True:
+            raise ValueError(f"{task_id} hold answer must not request confirmation")
+    elif control == "ask":
+        if "clarify" not in verbs:
+            raise ValueError(f"{task_id} ask answer must include clarify event")
+        if policy.get("requires_confirmation") is not True or scope.get("requires_user_confirmation") is not True:
+            raise ValueError(f"{task_id} ask answer must require confirmation")
+        if verbs & {"dispatch", "update"}:
+            raise ValueError(f"{task_id} ask answer must not execute dispatch or update")
+    elif scope.get("mode") == "status_only":
+        if "update" not in verbs:
+            raise ValueError(f"{task_id} status_only answer must include update event")
+        if verbs & {"dispatch", "redact", "clarify", "guard"}:
+            raise ValueError(f"{task_id} status_only answer has contradictory plan")
+    elif control == "amend":
+        if scope.get("mode") != "redacted" or not {"redact", "dispatch"} <= verbs:
+            raise ValueError(f"{task_id} amend answer must redact before dispatch")
+        if verbs & {"clarify", "guard", "update"}:
+            raise ValueError(f"{task_id} amend answer has contradictory plan")
+    elif control == "proceed":
+        if "dispatch" not in verbs:
+            raise ValueError(f"{task_id} proceed answer must include dispatch event")
+        if verbs & {"clarify", "guard", "redact"}:
+            raise ValueError(f"{task_id} proceed answer has contradictory plan")
 
 
 def write_submission_csv(payload: dict[str, Any], output_path: str | Path) -> None:
