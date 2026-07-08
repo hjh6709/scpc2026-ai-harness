@@ -298,6 +298,40 @@ def _precondition_invalidated(view: TaskView) -> bool:
     )
 
 
+def _doctor_note_external_precondition_invalidated(view: TaskView, focal: dict[str, Any]) -> bool:
+    if _doctor_note_external_scope_uncertain(view, focal):
+        return False
+    attrs = focal.get("attrs") or {}
+    raw_fields = set()
+    for key in ("contains", "fields"):
+        values = attrs.get(key)
+        if isinstance(values, list):
+            raw_fields.update(str(item) for item in values)
+    return (
+        str(focal.get("type") or "") == "health_record"
+        and ("doctor_note" in raw_fields or "raw_quote" in contained_fields(focal))
+        and view.record_value("external_share_policy") == "doctor_note_forbidden"
+        and not _is_local_update(view)
+        and not _condition_uncertain(view)
+    )
+
+
+def _doctor_note_external_scope_uncertain(view: TaskView, focal: dict[str, Any]) -> bool:
+    attrs = focal.get("attrs") or {}
+    raw_fields = set()
+    for key in ("contains", "fields"):
+        values = attrs.get(key)
+        if isinstance(values, list):
+            raw_fields.update(str(item) for item in values)
+    return (
+        str(focal.get("type") or "") == "health_record"
+        and ("doctor_note" in raw_fields or "raw_quote" in contained_fields(focal))
+        and view.record_value("external_share_policy") == "doctor_note_forbidden"
+        and not _is_local_update(view)
+        and _has_value(view, "새 전제가 확정되지", "누구에게 어떤 범위로 처리할지 다시 확인")
+    )
+
+
 def _condition_uncertain(view: TaskView) -> bool:
     return _has_value(
         view,
@@ -401,7 +435,7 @@ def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: d
         return "memory_store"
     if control == "hold" and _precondition_invalidated(view):
         return "user"
-    if control == "ask" and _condition_uncertain(view):
+    if control == "ask" and (_condition_uncertain(view) or _doctor_note_external_scope_uncertain(view, focal)):
         return "user"
     if control == "ask" and (_prior_hold_followup(view, session) or _prior_local_only_external_followup(view, session)):
         return "user"
@@ -442,10 +476,10 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
     types = view.record_types
     values = _record_values_text(view)
     prompt = view.prompt.lower()
-    if {"security_alert", "safety_mode"} & types or "phishing" in values or "피싱" in values or "impersonation" in values:
-        return "hold"
     if _is_local_update(view):
         return "proceed"
+    if {"security_alert", "safety_mode"} & types or "phishing" in values or "피싱" in values or "impersonation" in values:
+        return "hold"
     if _prior_hold_followup(view, session) or _prior_local_only_external_followup(view, session):
         return "ask"
     if "privacy_guard" in types:
@@ -462,6 +496,10 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
         return "hold"
     if _condition_uncertain(view):
         return "ask"
+    if _doctor_note_external_scope_uncertain(view, focal):
+        return "ask"
+    if _doctor_note_external_precondition_invalidated(view, focal):
+        return "hold"
     if any(word in prompt for word in ["다시 확인", "누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인"]):
         return "ask"
     if "payment_policy" in types and "requires_confirmation" in values:
@@ -488,7 +526,7 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
         return "ask"
     if types & ASK_RECORD_TYPES:
         return "ask"
-    if types & EXTERNAL_RECORD_TYPES or evidence.get("requires_redaction") or contained_fields(focal) & SENSITIVE_FIELDS:
+    if types & EXTERNAL_RECORD_TYPES or contained_fields(focal) & SENSITIVE_FIELDS:
         return "amend"
     return "proceed"
 
@@ -547,7 +585,7 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         flags.add("clarification_required")
     if control == "amend" or scope.get("mode") == "redacted":
         flags.add("minimal_disclosure")
-    invalidated_precondition = _precondition_invalidated(view)
+    invalidated_precondition = _precondition_invalidated(view) or _doctor_note_external_precondition_invalidated(view, focal)
     if types & PRECONDITION_RECORD_TYPES or "precondition" in values or invalidated_precondition or _stored_channel_ambiguous(view):
         flags.add("precondition_changed")
     if _has_value(view, "dispatch_blocked_until_binding", "authority_incomplete"):
