@@ -950,6 +950,17 @@ def answer_one(harness: Any, task: dict[str, Any], session: dict[str, Any]) -> d
     return answer
 
 
+def submission_answer(answer: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "focal_id": str(answer.get("focal_id") or ""),
+        "target": str(answer.get("target") or ""),
+        "control": answer.get("control"),
+        "content_scope": answer.get("content_scope") or {},
+        "policy": answer.get("policy") or {},
+        "plan_events": answer.get("plan_events") or [],
+    }
+
+
 def run_harness(tasks: list[dict[str, Any]], harness_cls: type = FinalHarness, *, harness_name: str = "scpc_rule_harness") -> dict[str, Any]:
     ordered = sorted(tasks, key=lambda t: (str(t.get("session_id", "")), int(t.get("turn_index", 0)), str(t.get("id", ""))))
     harness = harness_cls()
@@ -958,7 +969,7 @@ def run_harness(tasks: list[dict[str, Any]], harness_cls: type = FinalHarness, *
     for task in ordered:
         sid = str(task.get("session_id", ""))
         session = sessions.setdefault(sid, {})
-        answers[str(task["id"])] = answer_one(harness, task, session)
+        answers[str(task["id"])] = submission_answer(answer_one(harness, task, session))
     payload = {
         "schema": SUBMISSION_SCHEMA,
         "meta": {
