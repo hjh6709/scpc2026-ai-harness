@@ -14,6 +14,7 @@ FIXED_SLM_ID = "scpc-final-fixed-slm-local-facade"
 VALID_CONTROLS = {"proceed", "amend", "hold", "ask"}
 VALID_SCOPE_MODES = {"raw", "summary", "redacted", "status_only", "none"}
 SENSITIVE_FIELDS = {"raw_quote", "rrn", "name", "location", "numeric_value", "doctor_note", "card_number", "address"}
+FIELD_ALIASES = {"amount": "numeric_value", "doctor_note": "raw_quote"}
 LOCAL_UPDATE_VALUES = {"local_update_boundary", "local_update", "local_update_only", "memory_write"}
 ASK_RECORD_TYPES = {"ambiguous_target", "ambiguous_focal", "duration_ambiguous", "memory_conflict", "amount_changed", "merchant_verification", "routine_scope", "calendar_conflict"}
 HOLD_RECORD_TYPES = {"security_alert", "safety_mode", "privacy_guard"}
@@ -189,6 +190,10 @@ def choose_focal(view: TaskView) -> dict[str, Any]:
     refs = re.findall(r"WM-\d+", history)
     if refs:
         unique_refs = list(dict.fromkeys(refs))
+        if len(unique_refs) >= 3 and any(term in history for term in ["가운데 항목", "가운데 후보", "중간 항목", "중간 후보"]):
+            middle_ref = unique_refs[len(unique_refs) // 2]
+            if middle_ref in by_ref:
+                return by_ref[middle_ref]
         ordinal_to_index = {
             "첫 번째": 0,
             "첫번째": 0,
@@ -285,6 +290,14 @@ def _is_local_update(view: TaskView) -> bool:
         or "memory_write" in values
         or "내부 상태 업데이트" in prompt
         or "바깥으로 보내지 말고" in prompt
+        or "전달 동작은 취소" in prompt
+        or "보내는 작업은 취소하고 로컬 상태" in prompt
+        or "장치 안의 처리 상태만" in prompt
+        or "기기 내부 업데이트만" in prompt
+        or "수신처 전달 대신" in prompt
+        or "로컬 상태 기록으로만" in prompt
+        or "공유하지 말고 상태값만 갱신" in prompt
+        or "상태값만 갱신" in prompt
         or "내 기기 안에서 상태만 갱신" in prompt
         or "외부 공유가 아니라" in prompt
     )
@@ -295,9 +308,34 @@ def _has_status_update_boundary(view: TaskView) -> bool:
     return "local_update_boundary" in values or _is_local_update(view)
 
 
+def _unique_object_target(view: TaskView, focal_id: str = "") -> str:
+    candidates: set[str] = set()
+    for obj in view.objects:
+        if focal_id and str(obj.get("id")) == focal_id:
+            continue
+        attrs = obj.get("attrs") or {}
+        for key in ("recipient", "target", "channel", "attendee"):
+            if attrs.get(key):
+                candidates.add(str(attrs[key]))
+    return next(iter(candidates)) if len(candidates) == 1 else ""
+
+
 def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: dict[str, Any]) -> str:
     if _is_local_update(view):
         return "memory_store"
+    changed_target = view.record_value("target_changed_after_turn")
+    if control == "ask" and isinstance(changed_target, str) and "route_superseded" in changed_target:
+        return "security_review"
+    if control == "ask" and isinstance(changed_target, str) and changed_target and "invalidated" not in changed_target:
+        return changed_target
+    explicit_user_confirmation = any(word in view.prompt.lower() for word in ["누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인"])
+    if control == "ask" and not explicit_user_confirmation:
+        resolved = view.record_value("resolved_target")
+        if isinstance(resolved, str) and resolved:
+            return resolved
+        object_target = _unique_object_target(view, str(focal.get("id") or ""))
+        if object_target:
+            return object_target
     if control == "ask":
         return "user"
     resolved = view.record_value("resolved_target")
@@ -318,21 +356,31 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
     types = view.record_types
     values = _record_values_text(view)
     prompt = view.prompt.lower()
-    if types & HOLD_RECORD_TYPES or "phishing" in values or "피싱" in values or "impersonation" in values:
+    if {"security_alert", "safety_mode"} & types or "phishing" in values or "피싱" in values or "impersonation" in values:
         return "hold"
+    if _is_local_update(view):
+        return "proceed"
+    if "privacy_guard" in types:
+        return "hold"
+    if "target_changed_after_turn" in types and "route_superseded" in values:
+        return "ask"
     if types & PRECONDITION_RECORD_TYPES and any(word in values or word in prompt for word in ["invalidated", "바뀐", "변경", "precondition"]):
         return "hold"
+    if "target_changed_after_turn" in types:
+        return "ask"
     if "consent" in types and any(word in values for word in ["revoked", "withdraw", "denied", "철회", "거부"]):
         return "hold"
     if _has_value(view, "취소된", "더 진행하면 안 된다", "전제가 사라", "실행하면 안 된다", "precondition_invalidated", "prior_success_invalidated"):
         return "hold"
     if any(word in prompt for word in ["다시 확인", "누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인"]):
         return "ask"
-    if _is_local_update(view):
-        return "proceed"
+    if "payment_policy" in types and "requires_confirmation" in values:
+        return "ask"
     if _has_status_update_boundary(view) and "ambiguous_target" not in types and _has_value(view, "internal_binding_confirmed", "route_verified", "single_internal_candidate"):
         return "proceed"
     if _has_value(view, "redacted_summary_only", "summary_only", "minimal_disclosure", "식별 가능한 세부값을 제외"):
+        return "amend"
+    if _has_value(view, "redacted_external_boundary") and _has_value(view, "internal_binding_confirmed", "single_internal_candidate"):
         return "amend"
     if _has_value(view, "raw_sensitive_forbidden", "privacy_rule_violation"):
         return "hold"
@@ -350,8 +398,13 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
 
 
 def contained_fields(focal: dict[str, Any]) -> set[str]:
-    contains = (focal.get("attrs") or {}).get("contains")
-    return {str(item) for item in contains} if isinstance(contains, list) else set()
+    attrs = focal.get("attrs") or {}
+    fields: set[str] = set()
+    for key in ("contains", "fields"):
+        values = attrs.get(key)
+        if isinstance(values, list):
+            fields.update(str(item) for item in values)
+    return {FIELD_ALIASES.get(field, field) for field in fields}
 
 
 def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evidence: dict[str, Any]) -> dict[str, Any]:
@@ -362,7 +415,7 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
     if control == "ask":
         return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": excluded, "requires_user_confirmation": True}
     if _has_status_update_boundary(view):
-        local_excluded = sorted((contains & SENSITIVE_FIELDS) | {"raw_quote", "location", "numeric_value"})
+        local_excluded = sorted({"raw_quote", "location", "numeric_value"} if contains & SENSITIVE_FIELDS else set())
         return {"mode": "status_only", "allowed_fields": ["status"], "excluded_fields": local_excluded, "requires_user_confirmation": False}
     if control == "amend":
         return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": excluded or ["raw_quote"], "requires_user_confirmation": False}
@@ -376,11 +429,14 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
     types = view.record_types
     values = _record_values_text(view)
     contains = contained_fields(focal)
-    if "session_share_policy" in types:
+    local_status = _has_status_update_boundary(view)
+    if local_status:
+        flags = set()
+    if str(view.record_value("session_share_policy") or "").lower() == "strict":
         flags.add("strict_share_policy")
-    if _has_status_update_boundary(view):
+    if local_status:
         flags.add("local_only")
-    if types & EXTERNAL_RECORD_TYPES or "external" in values or "외부" in view.prompt:
+    if not local_status and (types & EXTERNAL_RECORD_TYPES or "external" in values or "외부" in view.prompt):
         flags.add("external_share")
     if contains & SENSITIVE_FIELDS or "sensitive" in values:
         flags.add("sensitive_content")
@@ -418,9 +474,18 @@ def build_plan_events(focal_id: str, target: str, control: str, scope: dict[str,
             {"verb": "read", "target": focal_id, "args": {"purpose": purpose}},
             {"verb": "guard", "target": focal_id, "args": {"reason": reason}},
         ]
-    events = [{"verb": "read", "target": focal_id, "args": {"purpose": "inspect_context"}}]
+    read_purpose = "inspect_context"
+    if scope.get("mode") == "status_only":
+        read_purpose = "local_update"
+    elif control == "amend":
+        read_purpose = "minimal_disclosure"
+    events = [{"verb": "read", "target": focal_id, "args": {"purpose": read_purpose}}]
     if control == "ask":
         reason = "target_ambiguity" if "target_ambiguity" in policy.get("risk_flags", []) else "clarification_required"
+        if target != "user":
+            read_purpose = "route_resolution_required"
+            events[0]["args"]["purpose"] = read_purpose
+            reason = "route_resolution_required"
         events.append({"verb": "clarify", "target": "user", "args": {"reason": reason}})
     elif scope.get("mode") == "status_only":
         events.append({"verb": "verify", "target": "share_boundary_update", "args": {"scope": "local_update"}})

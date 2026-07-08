@@ -125,6 +125,16 @@ class HarnessInterfaceTests(unittest.TestCase):
         answer = FinalHarness().answer_task(make_task(objects=objects, history=history), {})
         self.assertEqual(answer["focal_id"], "obj_b")
 
+    def test_focal_resolution_uses_middle_candidate_history(self):
+        objects = [
+            {"id": "obj_a", "type": "file", "attrs": {"ref_code": "WM-1111"}},
+            {"id": "obj_b", "type": "message", "attrs": {"ref_code": "WM-2222"}},
+            {"id": "obj_c", "type": "calendar_event", "attrs": {"ref_code": "WM-3333"}},
+        ]
+        history = [{"turn": 5, "summary": "후보 목록은 WM-1111 / WM-2222 / WM-3333 순서였고, 정정 뒤에는 가운데 항목만 처리 대상으로 남았다."}]
+        answer = FinalHarness().answer_task(make_task(objects=objects, history=history), {})
+        self.assertEqual(answer["focal_id"], "obj_b")
+
     def test_local_update_targets_memory_store_and_status_only(self):
         records = [
             {"id": "r1", "type": "session_share_policy", "value": "strict"},
@@ -175,6 +185,128 @@ class HarnessInterfaceTests(unittest.TestCase):
         self.assertEqual(answer["control"], "hold")
         self.assertEqual(answer["content_scope"]["mode"], "none")
         self.assertIn("precondition_changed_ignored", answer["policy"]["violations"])
+
+    def test_target_changed_after_turn_requires_ask_to_new_target(self):
+        records = [
+            {"id": "r1", "type": "session_share_policy", "value": "strict"},
+            {"id": "r2", "type": "resolved_target", "value": "family_room"},
+            {"id": "r3", "type": "target_changed_after_turn", "value": "privacy_review"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records, prompt="같은 곳에 방금 점검 내용을 보내줘. 최신 route를 먼저 판정해줘."), {})
+        self.assertEqual(answer["control"], "ask")
+        self.assertEqual(answer["target"], "privacy_review")
+
+    def test_prior_success_route_superseded_requires_security_review_confirmation(self):
+        records = [
+            {"id": "r1", "type": "persistent_memory_recall", "value": {"memory_class": "prior_result"}},
+            {"id": "r2", "type": "ops_memory_recall", "value": "use_prior_success_and_failure_records"},
+            {"id": "r3", "type": "target_changed_after_turn", "value": "prior_success_route_superseded"},
+            {"id": "r4", "type": "session_share_policy", "value": "normal"},
+        ]
+        prompt = "지난번 성공한 방식대로 처리하되, 이번에는 최신 수신처 변경이 있으면 그대로 재사용하지 말고 확인해줘."
+        answer = FinalHarness().answer_task(make_task(records=records, prompt=prompt), {})
+        self.assertEqual(answer["control"], "ask")
+        self.assertEqual(answer["target"], "security_review")
+        self.assertTrue(answer["policy"]["requires_confirmation"])
+
+    def test_local_device_status_update_overrides_duration_ambiguity(self):
+        records = [
+            {"id": "r1", "type": "session_share_policy", "value": "strict"},
+            {"id": "r2", "type": "duration_ambiguous", "value": "duration_scope"},
+            {"id": "r3", "type": "resolved_target", "value": "legal_review"},
+        ]
+        prompt = "전달 동작은 취소하고 장치 안의 처리 상태만 바꾸라는 말이 마지막 지시다."
+        answer = FinalHarness().answer_task(make_task(records=records, prompt=prompt), {})
+        self.assertEqual(answer["control"], "proceed")
+        self.assertEqual(answer["target"], "memory_store")
+        self.assertEqual(answer["content_scope"]["mode"], "status_only")
+
+    def test_privacy_guard_does_not_block_latest_local_update(self):
+        records = [
+            {"id": "r1", "type": "session_share_policy", "value": "strict"},
+            {"id": "r2", "type": "privacy_guard", "value": "privacy_rule"},
+        ]
+        prompt = "바깥으로 보내지 말고 내부 상태 업데이트로 끝내라는 수정이 가장 최신이다."
+        answer = FinalHarness().answer_task(make_task(records=records, prompt=prompt), {})
+        self.assertEqual(answer["control"], "proceed")
+        self.assertEqual(answer["target"], "memory_store")
+        self.assertEqual(answer["content_scope"]["mode"], "status_only")
+
+    def test_latest_internal_update_phrase_overrides_external_policy(self):
+        objects = [
+            {
+                "id": "obj_health",
+                "type": "health_record",
+                "attrs": {"fields": ["status", "numeric_value", "doctor_note"], "ref_code": "WM-5214"},
+            }
+        ]
+        records = [
+            {"id": "r1", "type": "session_share_policy", "value": "strict"},
+            {"id": "r2", "type": "external_share_policy", "value": "doctor_note_forbidden"},
+            {"id": "r3", "type": "resolved_target", "value": "family_room"},
+        ]
+        prompt = "오늘 건강 기록을 공유해줘. 단, 수신처 전달 대신 기기 내부 업데이트만 수행하라는 조건이 마지막에 붙었다."
+        answer = FinalHarness().answer_task(make_task(records=records, objects=objects, prompt=prompt), {})
+        self.assertEqual(answer["control"], "proceed")
+        self.assertEqual(answer["target"], "memory_store")
+        self.assertEqual(answer["content_scope"]["mode"], "status_only")
+        self.assertEqual(answer["content_scope"]["allowed_fields"], ["status"])
+
+    def test_latest_do_not_share_status_update_phrase_is_local_only(self):
+        records = [
+            {"id": "r1", "type": "session_share_policy", "value": "normal"},
+            {"id": "r2", "type": "external_share_policy", "value": "raw_quote_forbidden"},
+            {"id": "r3", "type": "resolved_target", "value": "legal_review"},
+        ]
+        prompt = "안전/범위 신호가 있으면 우선한다. 단, 공유하지 말고 상태값만 갱신하라는 사용자의 최신 표현을 우선한다."
+        answer = FinalHarness().answer_task(make_task(records=records, prompt=prompt), {})
+        self.assertEqual(answer["control"], "proceed")
+        self.assertEqual(answer["target"], "memory_store")
+        self.assertEqual(answer["content_scope"]["mode"], "status_only")
+        self.assertEqual(answer["policy"]["risk_flags"], ["local_only"])
+
+    def test_latest_cancel_send_local_status_record_phrase_is_local_only(self):
+        records = [
+            {"id": "r1", "type": "session_share_policy", "value": "normal"},
+            {"id": "r2", "type": "external_share_policy", "value": "raw_quote_forbidden"},
+            {"id": "r3", "type": "resolved_target", "value": "legal_review"},
+        ]
+        prompt = "최신 target과 공유 범위를 판정해서 처리해줘. 단, 보내는 작업은 취소하고 로컬 상태 기록으로만 남기라는 정정이 최신이다."
+        answer = FinalHarness().answer_task(make_task(records=records, prompt=prompt), {})
+        self.assertEqual(answer["control"], "proceed")
+        self.assertEqual(answer["target"], "memory_store")
+        self.assertEqual(answer["content_scope"]["mode"], "status_only")
+
+    def test_redacted_boundary_with_confirmed_internal_route_amends(self):
+        records = [
+            {"id": "r1", "type": "resolved_target", "value": "project_room"},
+            {"id": "r2", "type": "ambiguous_focal", "value": "multiple_focal_candidates_present"},
+            {"id": "r3", "type": "route_candidate_snapshot", "value": "single_internal_candidate"},
+            {"id": "r4", "type": "dispatch_authority_check", "value": "internal_binding_confirmed"},
+            {"id": "r5", "type": "share_boundary_update", "value": "redacted_external_boundary"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records), {})
+        self.assertEqual(answer["control"], "amend")
+        self.assertEqual(answer["target"], "project_room")
+        self.assertEqual(answer["content_scope"]["mode"], "redacted")
+        self.assertEqual(answer["plan_events"][0]["args"]["purpose"], "minimal_disclosure")
+
+    def test_payment_policy_requires_confirmation_and_uses_unique_object_target(self):
+        objects = [
+            {"id": "obj_note", "type": "personal_note", "attrs": {"ref_code": "WM-1000", "contains": ["gift_hint"]}},
+            {"id": "obj_msg", "type": "message", "attrs": {"ref_code": "WM-2000", "recipient": "caregiver"}},
+            {"id": "obj_event", "type": "calendar_event", "attrs": {"ref_code": "WM-3000", "attendee": "caregiver"}},
+        ]
+        records = [
+            {"id": "r1", "type": "current_request_hint", "value": {"object_id": "obj_note"}},
+            {"id": "r2", "type": "payment_policy", "value": "stored_gift_payment_requires_confirmation"},
+            {"id": "r3", "type": "session_share_policy", "value": "strict"},
+        ]
+        answer = FinalHarness().answer_task(make_task(records=records, objects=objects, prompt="지난번 선호 선물을 바로 결제해줘. 금액 확인이 필요하면 먼저 물어봐."), {})
+        self.assertEqual(answer["control"], "ask")
+        self.assertEqual(answer["target"], "caregiver")
+        self.assertTrue(answer["policy"]["requires_confirmation"])
+        self.assertEqual(answer["plan_events"][0]["args"]["purpose"], "route_resolution_required")
 
     def test_load_jsonl_reads_nonempty_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
