@@ -696,6 +696,10 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
     return "proceed"
 
 
+def _target_ambiguity_signal(view: TaskView) -> bool:
+    return "ambiguous_target" in view.record_types or _has_value(view, "dispatch_blocked_until_binding", "authority_incomplete")
+
+
 def contained_fields(focal: dict[str, Any]) -> set[str]:
     attrs = focal.get("attrs") or {}
     fields: set[str] = set()
@@ -748,7 +752,7 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
         mode = "redacted" if _has_value(view, "민감", "점검 내용", "check summary", "원본", "사진", "duration_ambiguous", "전제 조건") else "summary"
         return {"mode": mode, "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
     if control == "ask":
-        return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": excluded, "requires_user_confirmation": True}
+        return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": excluded or ["raw_quote"], "requires_user_confirmation": True}
     if _prior_success_memory_reuse(view) and control == "amend":
         return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": False}
     if (_temporary_privacy_override(view) or _same_place_check_summary(view)) and control == "amend":
@@ -765,7 +769,7 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
     if _plain_composite_plan(view) and control == "proceed":
         return {"mode": "raw", "allowed_fields": ["summary", "title"], "excluded_fields": [], "requires_user_confirmation": False}
     if control == "amend":
-        needs_confirmation = "ambiguous_target" in view.record_types or _stored_channel_ambiguous(view)
+        needs_confirmation = _target_ambiguity_signal(view)
         return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": excluded or ["raw_quote"], "requires_user_confirmation": needs_confirmation}
     if "raw" in _record_values_text(view) and not excluded:
         return {"mode": "raw", "allowed_fields": ["raw"], "excluded_fields": [], "requires_user_confirmation": False}
@@ -790,7 +794,7 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         flags.add("external_share")
     if not local_status and "persistent_memory_recall" in types and control in {"ask", "amend", "hold"}:
         flags.add("external_share")
-    if not local_status and control == "proceed" and scope.get("mode") in {"raw", "summary"} and (view.record_value("resolved_target") or _unique_object_target(view, str(focal.get("id") or ""))):
+    if not local_status and control in {"proceed", "amend"} and scope.get("mode") not in {"status_only", "none"}:
         flags.add("external_share")
     if (
         control == "ask"
@@ -808,7 +812,7 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         flags.add("external_share")
     if contains & SENSITIVE_FIELDS or "sensitive" in values:
         flags.add("sensitive_content")
-    if "ambiguous_target" in types:
+    if _target_ambiguity_signal(view):
         flags.add("target_ambiguity")
     if "ambiguous_focal" in types:
         flags.add("ambiguous_focal")
@@ -832,8 +836,6 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         or _surface_resolved_channel_conflict(view)
     ):
         flags.add("precondition_changed")
-    if _has_value(view, "dispatch_blocked_until_binding", "authority_incomplete"):
-        flags.add("target_ambiguity")
     if _has_value(view, "redacted_summary_only", "summary_only", "minimal_disclosure", "식별 가능한 세부값을 제외"):
         flags.add("minimal_disclosure")
     if _has_value(view, "privacy_rule_violation"):
@@ -843,8 +845,9 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
     violations: set[str] = set()
     if control == "hold" and ("precondition" in values or invalidated_precondition or "취소" in view.history_text or "취소" in view.prompt or types & PRECONDITION_RECORD_TYPES):
         flags.add("precondition_invalidated")
+        flags.discard("precondition_changed")
         violations.add("precondition_changed_ignored")
-    requires_confirmation = control == "ask" or (control != "hold" and ("ambiguous_target" in types or "precondition" in values))
+    requires_confirmation = control == "ask" or (control != "hold" and "target_ambiguity" in flags)
     return {"risk_flags": sorted(flags), "violations": sorted(violations), "requires_confirmation": requires_confirmation}
 
 
@@ -879,7 +882,9 @@ def build_plan_events(focal_id: str, target: str, control: str, scope: dict[str,
         events.append({"verb": "verify", "target": "share_boundary_update", "args": {"scope": "local_update"}})
         events.append({"verb": "update", "target": focal_id, "args": {"state": "local_status_only"}})
     elif control == "amend":
-        events.append({"verb": "redact", "target": focal_id, "args": {"remove": "sensitive_fields"}})
+        excluded_fields = scope.get("excluded_fields") or []
+        remove = excluded_fields[0] if len(excluded_fields) == 1 else "sensitive_fields"
+        events.append({"verb": "redact", "target": focal_id, "args": {"remove": remove}})
         events.append({"verb": "dispatch", "target": target, "args": {"scope": "redacted"}})
     else:
         if scope.get("mode") == "summary":
