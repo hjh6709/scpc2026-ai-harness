@@ -164,8 +164,8 @@ FOCAL_ORDINAL_WORDS = {
     "첫": 0, "두": 1, "세": 2, "네": 3, "다섯": 4,
     "여섯": 5, "일곱": 6, "여덟": 7, "아홉": 8, "열": 9,
 }
-FOCAL_POSITIVE_TERMS = ["확정", "최종", "선택", "지정", "채택", "결정", "승인", "처리 대상", "selected", "final", "confirm"]
-FOCAL_NEGATIVE_TERMS = ["제외", "보류", "무시", "폐기", "취소", "decoy", "hold", "exclude"]
+FOCAL_POSITIVE_TERMS = ["확정", "최종", "선택", "지정", "채택", "결정", "승인", "처리 대상", "통과", "고정", "selected", "final", "confirm"]
+FOCAL_NEGATIVE_TERMS = ["제외", "보류", "무시", "폐기", "취소", "배제", "decoy", "hold", "exclude"]
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -212,6 +212,13 @@ def choose_focal(view: TaskView) -> dict[str, Any]:
     refs = re.findall(r"WM-\d+", history)
     if refs:
         unique_refs = list(dict.fromkeys(refs))
+
+        pass_match = re.search(r"(WM-\d+)\s*(?:만|only)\s*(?:통과|pass)", history)
+        if pass_match and pass_match.group(1) in by_ref:
+            return by_ref[pass_match.group(1)]
+        fixed_match = re.search(r"(WM-\d+)\s*(?:로|으로)?\s*고정", history)
+        if fixed_match and fixed_match.group(1) in by_ref:
+            return by_ref[fixed_match.group(1)]
 
         if (
             len(unique_refs) >= 2
