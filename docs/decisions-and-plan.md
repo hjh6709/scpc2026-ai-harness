@@ -179,3 +179,27 @@ dev 전체: 0.9389 → **0.9444** (control 축 100%, focal 100%, target 97.5%, c
 **검증**: 74개 테스트 전체 통과, drift guard 통과, dev 0.9389 → **0.9384**(doctor_note 롤백으로 인한 예상된 소폭 하락, 나머지 두 변경은 dev 점수에 영향 없음 — 예측과 정확히 일치). `submission.csv` 재생성, `audit_screening.py` 재실행으로 새로운 이상 없음 확인.
 
 **교훈**: population 크기(n=1, n=2)만으로는 위험을 다 못 잡는다 — 진짜 판별 기준은 "이 신호가 dev 밖(screening)에서도 재현되는가"와 "구조적 필드에 근거하는가"이고, 이 프로젝트는 이미 한 번 그 교훈을 비싸게 치른 적이 있다(`6af99a1`). 앞으로 새 규칙을 추가할 때는 dev 검증뿐 아니라 **screening에서의 문구/신호 재현 여부를 항상 같이 확인**하는 것을 표준 절차로 삼는다.
+
+## 목표 0.96 라운드 — local dev 점수의 수학적 상한, 그리고 screening-recurrence 감사로 찾은 진짜 버그 2건
+
+사용자가 "추측하지 말고 정확하게 hidden에서도 쓸 수 있도록 근거를 내서" 0.96을 목표로 고도화를 요청. 먼저 확인한 것: 채점 가중치(`focal*0.18 + target*0.12 + control*0.18 + content_scope*0.17 + policy*0.13 + plan*0.18 + semantic_response*0.04 + counterfactual*0.0`)에서 `semantic_response`(가중치 0.04)는 로컬에서 의미 기반 모델 없이는 항상 0으로만 측정됨(baseline 노트북에도 명시된 로컬 채점의 한계) — 즉 **local dev 점수의 수학적 상한은 정확히 0.96**(다른 모든 축이 완벽한 1.0일 때). 사용자가 요청한 목표점수 0.96은 사실상 "로컬에서 측정 가능한 모든 축을 완벽하게 만들어라"와 동일한 요구.
+
+현재 dev 0.9384에서 남은 손실을 전수 분해한 결과, 이미 다 파악된 6개 태스크로 완전히 설명됨(다른 미지의 mismatch 없음을 `focal/target/control 모두 일치하는데 scope/policy만 다른 경우`까지 별도로 재확인):
+- `0937ccedef94`(control): 이전 라운드에서 규정 위반 리스크로 의도적으로 되돌린 것.
+- `6903fe98eb6a`/`511b1dc0b84d`/`a7f2a443f654`(target): 참조하는 cross-session memory write가 dev+screening 전체 어디에도 실제로 존재하지 않음 — 데이터 자체가 없어 코드로 해결 불가능.
+- `31fb29f3b379`(content_scope.mode): 동일 트리거 단어가 더 넓은 population(n=24)에서 정확히 2:1로 갈리는 순수 노이즈로 이미 결론.
+- `891dd2e62a0a`(content_scope.mode): 이전 라운드에서 screening 재현율 0으로 확인되어 의도적으로 되돌린 것.
+
+즉 "쉽게 더 딸 수 있는 dev 점수"는 이미 없다 — 남은 격차를 메우려면 방금 되돌린 것과 같은 종류의 위험한 규칙을 다시 추가해야 한다. 그래서 방향을 바꿔 **dev 점수에는 안 잡히지만 hidden 일반화에는 영향을 주는 구조적 결함**을 찾기로 함 — `audit_screening.py`의 "Rule coverage" 섹션(각 predicate가 screening 700개 중 몇 번이나 실제로 발동하는지)을 전수 재검사.
+
+**핵심 방법론 교정**: `rule_coverage()`와 내 첫 조사 스크립트 둘 다 predicate 함수를 단독 호출해서 세는 방식이었는데, 이건 `decide_control`의 if-chain에서 그 앞의 조건이 먼저 걸려서 실제로는 도달하지 않는 경우까지 "발동"으로 잘못 셀 수 있다(이 프로젝트가 이미 한 번 겪은 "session-isolation 버그로 0건처럼 보임" 문제의 사촌격 - 이번엔 반대로 과대 카운트 방향). `decide_control_traced`로 실제 도달 브랜치까지 확인해야 진짜 population을 알 수 있음 — 새로 표준 절차로 채택.
+
+**Rule coverage 0건인 predicate 4개를 전수 재조사**:
+
+1. **`_guardrail_verified_external_route`, `_surface_resolved_channel_conflict`** — 둘 다 순수 구조적(record type/enum 값만 사용, 한국어 문구 매칭 없음). 이들이 참조하는 개별 필드값(`route_candidate_snapshot=="single_internal_candidate"` 등)은 screening에서 각각 57~103회씩 재현됨 — 이 predicate들의 screening 0건은 "5개 조건이 동시에 다 맞아떨어지는 조합"이 우연히 screening에 없었을 뿐인 조합적 희소성이지, 존재하지 않는 어휘에 의존한 게 아님. **조치 없음, 유지.**
+2. **`_same_place_check_summary`** — `decide_control`에서 **`control` 필드를 직접 결정**(blast radius가 지난번 되돌린 규칙과 동급). 원래 조건 4개 중 3개("같은 곳"/"점검 내용" 등)는 screening에 18회나 재현되는데, 나머지 하나("최근 동의"/"최신 consent")만 dev 50건에 있고 screening 0건 — 이 한 조건이 사실상 이 규칙 전체를 screening/hidden에서 죽은 코드로 만들고 있었음. 이 문구가 나오는 dev 태스크 4개를 직접 열어보니 전부 `session_share_policy=="strict"`였고, 유일하게 이 시나리오인데 "proceed"를 원하는 dev 태스크(`aca57c383d4c`)는 `session_share_policy=="normal"` — **구조적 필드로 완전히 치환 가능**함을 발견. `session_share_policy=="strict"`로 교체 후 dev 전체 재검증: 기존 4건 + 새로 포함된 1건(`aca57c383d4c`) 전부 정확, 새 mismatch 0. screening에서도 실제로 이 필드가 정확히 갈리는 것 확인(normal 15건, strict 3건) → **구조적으로 재작성, screening 재현 0건→3건.**
+3. **`_summary_only_composite_plan`** — 같은 "최근 동의"/"최신 consent" 문구를 5개 조건 중 하나로 요구하고 있었고, 나머지 4개 조건(요약본만/임시 알림/masked_ref 등)은 screening에서 각각 25~100회씩 재현됨. dev 2건 모두 이 문구가 있든 없든 결과가 똑같아(제거해도 dev 영향 0) 안전하게 제거 가능함을 먼저 확인. 제거 후 screening에서 새로 3건이 이 규칙에 걸렸는데, 그중 실제로 답이 바뀌는 1건(`final_screening_ef91f9b790d0`)을 직접 열어보니 — object의 `contains`가 `["summary", "raw_quote", "name", "location"]`이고 요청 문구가 명시적으로 "요약본만 보낸 뒤"(summary만 보내라)인데, 기존 코드는 `proceed`+`mode="raw"`로 답해서 raw_quote/name/location까지 그대로 새 나가는 답을 내고 있었음 — **명백한 버그**(사용자 요청과 정면으로 모순). 제거 후 `amend`+`mode="redacted"`로 정정됨. **제거, screening 재현 0건→3건, 그중 1건은 실질 오답을 수정.**
+
+**검증**: 74개 테스트 전체 통과, drift guard 통과, dev 0.9384 → **0.9384**(예측대로 dev 영향 0 — 두 변경 모두 dev population을 그대로 보존하면서 screening/hidden 재현성만 개선). `submission.csv` 재생성, `_same_place_check_summary`/`_summary_only_composite_plan` screening 발동 횟수 0→3/0→3으로 확인.
+
+**결론 (0.96 목표에 대한 정직한 평가)**: local dev 0.9384는 이미 "안전하게 고칠 수 있는 모든 것"을 고친 상태이고, 남은 0.0216만큼의 격차는 (a) 데이터 자체가 없어 코드로 못 푸는 3건, (b) 규정 위반 리스크 때문에 의도적으로 포기한 2건으로 전부 설명됨 — dev 점수만 억지로 0.96에 맞추려면 이번 세션에서 두 번이나 되돌린 것과 같은 위험한 패턴을 다시 넣어야 한다. 대신 이번 라운드는 dev 점수엔 안 보이지만 hidden 일반화에는 실제로 영향을 미치는 두 건(하나는 순수 위험 감소, 하나는 확인된 실질 버그)을 찾아 고쳤다 — **"dev 축 완벽화"가 아니라 "screening/hidden에서 실제로 작동하는 코드로 만들기"가 이제부터의 올바른 고도화 방향**이라는 게 이번 라운드의 핵심 결론.

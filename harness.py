@@ -424,11 +424,20 @@ def _temporary_privacy_override(view: TaskView) -> bool:
 
 
 def _same_place_check_summary(view: TaskView) -> bool:
+    # Originally gated on a fourth phrase ("최근 동의"/"최신 consent") that
+    # turned out to be dev-only boilerplate (50 dev occurrences, 0 in the 700
+    # screening tasks) - it silently zeroed this rule's screening reach even
+    # though the "같은 곳"+"점검 내용" scenario itself recurs 18 times there.
+    # Replaced with session_share_policy=="strict", the structural field this
+    # codebase already uses elsewhere for the same strict-vs-normal handling
+    # distinction - dev-verified as a clean discriminator across every dev
+    # task with this scenario (5/5, including the "normal" case the old
+    # phrase-based gate had accidentally screened out).
     return (
         view.record_value("resolved_target") is not None
         and _has_value(view, "same place", "같은 곳")
         and _has_value(view, "check summary", "점검 요약", "점검 내용")
-        and _has_value(view, "recent consent", "최신 consent", "최근 동의")
+        and str(view.record_value("session_share_policy") or "").lower() == "strict"
     )
 
 
@@ -493,12 +502,20 @@ def _surface_resolved_channel_conflict(view: TaskView) -> bool:
 
 
 def _summary_only_composite_plan(view: TaskView) -> bool:
+    # Dropped a fifth phrase requirement ("최근 동의"/"최신 consent") for the
+    # same reason as _same_place_check_summary: dev-only boilerplate (0
+    # occurrences in the 700 screening tasks) that was silently blocking this
+    # from ever firing on screening even though its other terms (요약본만/
+    # 임시 알림/masked_ref) each recur dozens of times there. Dev impact is
+    # zero (both dev matches already satisfied the dropped clause too); on
+    # screening it corrects a real case where the object's own contains list
+    # includes raw_quote/name/location but the request explicitly asks for
+    # "요약본만" (summary only) - the old gate left that going out as "raw".
     text = view.all_text
     return (
         view.record_value("resolved_target") is not None
         and any(term in text for term in ["요약본만", "요약만"])
         and "임시 알림" in text
-        and _has_value(view, "최근 동의", "최신 consent")
         and _has_value(view, "masked_ref")
         and not _condition_uncertain(view)
         and "duration_ambiguous" not in view.record_types
