@@ -233,6 +233,12 @@ def choose_focal(view: TaskView) -> dict[str, Any]:
         fixed_match = re.search(r"(WM-\d+)\s*(?:로|으로)?\s*고정", history)
         if fixed_match and fixed_match.group(1) in by_ref:
             return by_ref[fixed_match.group(1)]
+        stated_match = re.search(r"참조는\s*(WM-\d+)(?:이다|다)", history)
+        if stated_match and stated_match.group(1) in by_ref:
+            return by_ref[stated_match.group(1)]
+        binding_match = re.search(r"binding[은는]\s*(WM-\d+)[을를]\s*현재\s*턴의\s*참조로\s*지정", history)
+        if binding_match and binding_match.group(1) in by_ref:
+            return by_ref[binding_match.group(1)]
 
         if (
             len(unique_refs) >= 2
