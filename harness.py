@@ -1058,7 +1058,16 @@ def update_session_memory(view: TaskView, session: dict[str, Any], user_memory: 
     value = view.record_value("persistent_memory_write")
     if isinstance(value, dict):
         key = str(value.get("memory_key") or value.get("person") or view.task_id)
-        user_memory[key] = value
+        # Every dev+screening memory_key is currently written exactly once (a
+        # single full profile bundle, never a partial update across turns), so
+        # this merge is a no-op on real data - but a second write to the same
+        # key overwriting the whole dict would silently drop any field only the
+        # first write had, for an unseen task stream that does update partially.
+        existing = user_memory.get(key)
+        if isinstance(existing, dict):
+            existing.update(value)
+        else:
+            user_memory[key] = value
         session["last_memory_key"] = key
 
 
@@ -1146,7 +1155,11 @@ def validate_payload(payload: dict[str, Any], expected_ids: set[str] | None = No
                 raise ValueError(f"{task_id} missing {field}")
         if answer["control"] not in VALID_CONTROLS:
             raise ValueError(f"{task_id} has invalid control")
-        if (answer.get("content_scope") or {}).get("mode") not in VALID_SCOPE_MODES:
+        if not isinstance(answer.get("content_scope"), dict):
+            raise ValueError(f"{task_id} content_scope must be an object")
+        if not isinstance(answer.get("policy"), dict):
+            raise ValueError(f"{task_id} policy must be an object")
+        if answer["content_scope"].get("mode") not in VALID_SCOPE_MODES:
             raise ValueError(f"{task_id} has invalid scope mode")
         if not isinstance(answer.get("plan_events"), list) or len(answer["plan_events"]) > 18:
             raise ValueError(f"{task_id} has invalid plan_events")
