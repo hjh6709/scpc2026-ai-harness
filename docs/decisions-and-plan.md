@@ -237,3 +237,26 @@ dev 전체: 0.9389 → **0.9444** (control 축 100%, focal 100%, target 97.5%, c
 **검증**: 74개 테스트 통과(갱신된 BOM 부재 검증 포함), drift guard 통과, dev 0.9384 그대로(순수 파일 I/O 변경이라 로직에는 영향 없음 - 예측대로), `submission.csv` 재생성 후 `open(..., encoding="utf-8")`로 읽었을 때 헤더가 정확히 `'submission'`으로 읽히는 것 확인.
 
 **남은 불확실성**: 이게 실제 원인인지는 다음 제출 결과로만 확인 가능함(리더보드에 세부 axis 점수가 없어 로컬에서 direct 검증 불가). 이것이 유일한 원인이 아닐 수도 있으므로, 다음 제출 후에도 여전히 격차가 크면 다른 광범위한 원인(예: novel record value 처리, 대량 샘플링된 구조적 조합에서의 체계적 오류)을 계속 의심해야 함.
+
+**업데이트(재제출 결과)**: BOM 제거 버전으로 재제출했으나 점수가 **동일하게 0.752**로 나옴 — BOM 가설은 반증됨. 이건 오히려 유용한 정보: 채점 파이프라인이 파일을 정상적으로 파싱하고 있었다는 뜻이고, 0.752는 파일 형식 문제가 아니라 **답안 정확도 자체**를 그대로 반영한 값임이 확인됨. 진단 방향을 다시 로직/데이터 커버리지 쪽으로 돌림.
+
+**정량적 재확인**: dev(120)와 screening(700)에서 `(record_type, value)` 조합을 전수 대조한 결과, **screening 태스크의 50.4%(353/700)가 dev에는 단 한 번도 없었던 조합을 최소 하나는 포함**함. 즉 우리가 dev로 "N/N 전수 검증"했다고 믿었던 규칙들도 애초에 screening의 절반에는 적용된 적이 없었던 셈 — 이번 세션 내내 찾은 개별 버그(수십 개 태스크 단위)로는 0.186점 격차를 설명하기 부족하고, 근본적으로는 "120개로 튜닝한 규칙이 700개의 다양성을 원천적으로 다 커버 못한다"는 구조적 한계일 가능성이 큼(사용자에게도 이 대회의 dev/screening/hidden 3단계 분할 자체가 일반화 테스트를 위한 의도적 설계임을 설명함).
+
+## "baseline을 아주 꼼꼼하게 읽어볼래" — 노트북 17개 셀 전수 재검토
+
+지금까지 baseline 노트북을 부분적으로만(검색 기반으로) 읽었는데, 사용자가 전체를 꼼꼼히 다시 읽으라고 요청. 17개 셀 전부를 순서대로 읽고 우리 코드와 하나씩 대조함.
+
+**찾은 것 — `personal_memory`를 우리 하니스가 전혀 안 읽고 있었음**: baseline의 reference `FixedSLMClient.summarize_task`는 `personal_memory[*].text`를 evidence 계산에 포함시키는데, 우리 `TaskView.all_text`/`_has_value`는 `personal_memory`를 아예 스캔하지 않았음. `TERMS_GUIDE.md`는 `personal_memory`를 prompt/device_state/visible_history와 동급의 "대표적인 최상위 필드"로 명시하고, "task 안에 공개된 prompt, device_state, records, visible_history, personal_memory를 해석하는 로직 구현"을 권장 패턴으로 직접 언급함 — 이 필드를 완전히 무시한 건 명백한 누락.
+
+이전 세션에서 "personal_memory는 dev 17건 기준으로 전부 이미 구조적 신호로 커버되는 중복 정보라 안 읽어도 된다"고 결론 냈었는데, 이번에 screening까지 다시 보니: **screening은 81건에 5종의 서로 다른 텍스트**(dev는 17건에 3종)를 가지고 있고, 그중 2종은 dev에 아예 없던 새 내용(`지난 세션에서 project_room은 내부 채널로 확인되었다`, `외부 공유에는 원문 인용과 위치 정보를 넣지 않는다`). 이 두 문구를 모두 가진 screening 태스크(`final_screening_12200624b6b7`)의 prompt는 **"지난번 선호를 반영해서 이 내용을 공유해줘"** — personal_memory를 읽으라는 명시적 지시임. dev만 보고 "필요 없다"고 판단했던 게 screening의 더 넓은 분포에서는 틀렸을 가능성.
+
+**조치**: `TaskView`에 `personal_memory_text` property 추가, `all_text`와 `_has_value`에 반영. dev 전체 재검증: **기존에 이미 받아들인 6건의 mismatch 외 새 mismatch 0건**(personal_memory monkeypatch 테스트로 사전 확인 후 실제 코드에 반영) — dev에 안전, screening 81건에는 이제 실제로 신호가 전달됨.
+
+**추가로 대조한 것들(문제 없음, 기록만)**:
+- `participant_task_view`/`REMOVED_SCORING_KEYS`(baseline이 raw task에서 `expected_*`/`*_brief`/`*_notes`/`*_rubric`/`*_keywords`/`*_tags`류 필드를 미리 제거하는 로직) — 우리 `dev_tasks.jsonl`/`screening_tasks.jsonl`에 그런 필드가 실제로 하나도 없음을 확인, 이미 정제된 참가자용 파일이라 우리가 따로 처리할 필요 없음.
+- `meta.seed` 값(baseline 노트북은 2026, TERMS_GUIDE.md 예시는 42, 우리는 42 사용) — `validate_payload`/채점 축 어디에도 seed가 실제로 검증/채점되는 곳이 없어 순수 메타데이터, 스코어에 영향 없음.
+- **`evaluate_dev.py`의 스코어링 함수 전체**(`_f1`/`_scope_score`/`_policy_score`/`_event_similarity`/`_plan_score`/`score_dev_submission`, `target=focal*match`/`control=focal*match`/`dependent=target*control` 게이팅, `WEIGHTS`, `PUBLIC_PLAN_ARG_VALUES` 95개)를 baseline 노트북 원문과 함수 단위로 전부 diff — **완전히 동일**함을 재확인. 즉 우리 로컬 dev 0.9384는 서버가 계산할 값과 동일한 방식으로 계산된, 신뢰할 수 있는 수치.
+- `PLAN_ARG_VALUE_ALIASES` 140개 중 55개가 우리 evaluate_dev.py에 없었는데, 54개는 key==value인 identity mapping이라 fallback 로직(`PUBLIC_PLAN_ARG_VALUES`에 있으면 그대로 반환)과 결과가 같아 실질적으로 무해. 단 1개(`"scope_pair_consent": "consent_check"`)는 진짜 누락이라 추가함 — 로컬 채점 도구 자체의 정밀도 문제였고 실제 리더보드 채점(서버가 자체 완전한 테이블을 쓸 것이므로)과는 무관.
+- `validate_payload`(우리 harness.py 버전)이 baseline보다 더 엄격(`seed==42`, `temperature==0.0`, `user_response`/`audit_tags`/`counterfactual` 필수 등 추가 검증) — 우리가 항상 그 조건을 만족하는 값을 생성하므로 실제로 막힌 적은 없음, 문제 아님.
+
+**검증**: 74개 테스트 통과, drift guard 통과, dev 0.9384 유지(personal_memory 추가는 dev에 영향 없음이 사전 확인대로 재현됨), `submission.csv` 재생성, `audit_screening.py` 재확인 이상 없음.

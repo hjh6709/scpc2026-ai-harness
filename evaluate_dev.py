@@ -108,6 +108,7 @@ PLAN_ARG_VALUE_ALIASES = {
     "composite_route_verified": "route_verified",
     "compare_file_gallery_candidates": "compare_candidates",
     "same_place_route_follow": "same_place_scope_check",
+    "scope_pair_consent": "consent_check",
     "numeric_value_family_share_failed": "numeric_value_blocked",
     "persistent_checkup_time": "appointment_time",
     "persistent_medication_time": "medication_time",

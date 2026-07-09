@@ -64,8 +64,20 @@ class TaskView:
         return " ".join(text_of(item) for item in self.task.get("visible_history", []) or [])
 
     @property
+    def personal_memory_text(self) -> str:
+        return " ".join(text_of(item.get("text")) for item in self.task.get("personal_memory", []) or [])
+
+    @property
     def all_text(self) -> str:
-        parts = [self.prompt, self.history_text]
+        # personal_memory is one of TERMS_GUIDE.md's five top-level input fields
+        # (alongside prompt/device_state/visible_history) and the organizer's own
+        # baseline FixedSLMClient.summarize_task folds it into its evidence scan -
+        # ours had never read it at all. dev-verified this doesn't change any of
+        # the 120 dev outcomes (personal_memory content there was redundant with
+        # structural signals already used), but screening has more and more
+        # varied personal_memory content, including at least one task whose
+        # prompt explicitly says to use it ("지난번 선호를 반영해서").
+        parts = [self.prompt, self.history_text, self.personal_memory_text]
         parts.extend(text_of(record.get("type")) + " " + text_of(record.get("value")) for record in self.records)
         parts.extend(text_of(obj.get("type")) + " " + text_of(obj.get("attrs")) for obj in self.objects)
         return " ".join(parts).lower()
@@ -312,7 +324,12 @@ def _record_values_text(view: TaskView) -> str:
 
 
 def _has_value(view: TaskView, *needles: str) -> bool:
-    values = _record_values_text(view) + " " + view.prompt.lower() + " " + view.history_text.lower()
+    values = (
+        _record_values_text(view)
+        + " " + view.prompt.lower()
+        + " " + view.history_text.lower()
+        + " " + view.personal_memory_text.lower()
+    )
     return any(needle.lower() in values for needle in needles)
 
 
