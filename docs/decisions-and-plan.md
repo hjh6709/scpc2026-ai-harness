@@ -24,6 +24,7 @@
 7. **통계만 보고 "괜찮다"고 넘기지 않는다.** ask control의 scope mode 분포가 dev 대비 치우쳐 있었을 때 처음엔 "새로 고친 ask 케이스가 원래 그런 경향일 것"이라고 넘겼는데, 실제로 특정 fallback 분기가 콘텐츠 신호를 아예 무시하는 버그였다. 이후로는 표면적 분포 차이도 실제 코드 경로까지 추적해서 원인을 확인한다.
 8. **텍스트 문구뿐 아니라 구조적 record 값 자체도 dev와 대조한다.** `route_candidate_snapshot`/`dispatch_authority_check` 같은 핵심 필드가 screening에만 있는 새로운 값(예: `local_authority_confirmed`)을 쓰는 경우, exact-match 비교 로직이 전부 놓친다. 문구 감사만으로는 못 잡는 유형의 버그라 별도로 체크해야 한다.
 9. **의미 있어 보이는 가설도 dev 정답으로 먼저 검증한다.** `user_binding_pending`이 "ask"를 의미할 거라 추측했는데, dev 정답을 대조해보니 실제로는 proceed/amend/hold에 고르게 분포하고 ask는 0건이었다 — 이름만 보고 판단하면 틀릴 수 있다.
+10. **채점식에서 다른 축을 게이팅하는 축을 최우선으로 계측한다.** `focal_id`가 틀리면 `target`/`control`까지 0점 처리되고, 그게 다시 `content_scope`/`policy`/`plan`을 곱셈으로 0으로 만든다 — 사실상 전체 점수의 96%가 focal 하나에 걸려있다. choose_focal의 각 해석 경로(marker_trace/direct_id/regex/ordinal/window_scoring/fallback)가 700개 중 몇 개씩 쓰이는지 계측해서, 가장 약한 경로(window_scoring, 20%)를 표본 조사했더니 실제로 33% 규모 버그(서수 인식 실패)가 나왔다. 통계/클러스터링이 안 통하는 축이라도, "이 축이 전체 점수에 얼마나 큰 지렛대를 가지는가"부터 따져서 우선순위를 정해야 한다.
 
 ## 지금까지 한 일 (커밋 순서)
 
@@ -42,6 +43,8 @@
 | `b556258` | 문서 정리 — 판단 원칙 8, 9번 추가, 상시 점검 루틴 절 추가 |
 | `c816840` | `user_response`/`audit_tags`/`counterfactual`를 제출에서 복원 — `semantic_response`(4%) 축을 로컬 채점기가 항상 0으로 고정해서 보여서 이 손실 자체를 감사로 못 잡고 있었음 |
 | `38b31b5` | 견고성 테스트 20개(`test_robustness.py`) + `audit_screening.py`에 exception sweep/shape invariant 전수 검사 추가 |
+| `7d7b936` | `excluded_fields` self-consistency 체크 시도 → dev 대조로 전제가 틀렸음을 확인하고 정정 (status_only의 dev 검증된 2가지 고정값만 체크로 축소) |
+| `2a1dc37` | **focal 해석 경로를 700개 전체에 계측**해서 가장 약한 fallback(window_scoring, 142개=20%)을 표본 조사 → "유효한"이 긍정 신호 목록에 없어서/"둘째·셋째" 어간이 "두째·세째"로 잘못 매핑돼서 서수 인식 자체가 실패하던 버그 2건 발견·수정. 232개(33%) 영향, window_scoring 의존 142→57로 감소, 남은 57개는 전수 검증으로 전부 정답 확인 |
 
 **실제 leaderboard 결과 추이**:
 
