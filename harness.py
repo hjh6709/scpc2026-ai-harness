@@ -774,7 +774,11 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
 
 
 def _target_ambiguity_signal(view: TaskView) -> bool:
-    return "ambiguous_target" in view.record_types or _has_value(view, "dispatch_blocked_until_binding", "authority_incomplete")
+    # dev-verified 0/120 mismatches: dispatch_authority_check=="user_binding_pending"
+    # (waiting on the user to bind a target) is real target ambiguity;
+    # "authority_incomplete" (route resolution still in progress) is not, even
+    # though both co-occur with share_boundary_update=="dispatch_blocked_until_binding".
+    return "ambiguous_target" in view.record_types or view.record_value("dispatch_authority_check") == "user_binding_pending"
 
 
 def contained_fields(focal: dict[str, Any]) -> set[str]:
@@ -874,6 +878,10 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         flags.add("external_share")
     if not local_status and control in {"proceed", "amend"} and scope.get("mode") not in {"status_only", "none"}:
         flags.add("external_share")
+    # amend always redacts-and-dispatches somewhere, so it always carries some
+    # external-share risk regardless of local_status - dev-verified 28/28.
+    if control == "amend":
+        flags.add("external_share")
     if (
         control == "ask"
         and (_condition_uncertain(view) or _confirmation_precondition(view) or _doctor_note_external_scope_uncertain(view, focal) or "duration_ambiguous" in types)
@@ -896,7 +904,10 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         flags.add("ambiguous_focal")
     if control == "ask":
         flags.add("clarification_required")
-    if control == "amend" or scope.get("mode") == "redacted":
+    # redacted mode under ask doesn't count as "minimal disclosure" - ask hasn't
+    # disclosed anything yet, it's still waiting on the user (dev-verified 9/9:
+    # every control=="ask"+mode=="redacted" dev task omits this flag).
+    if control == "amend" or (scope.get("mode") == "redacted" and control != "ask"):
         flags.add("minimal_disclosure")
     invalidated_precondition = (
         _precondition_invalidated(view)
@@ -906,15 +917,32 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         or _external_binding_blocked(view)
         or _revoked_or_security_precondition(view)
     )
+    # A route binding that just got confirmed (internal_binding_confirmed) means
+    # whatever precondition was open (which candidate/authority applies) just
+    # resolved - dev-verified as a clean discriminator: every route_binding_order
+    # task with dispatch_authority_check=="internal_binding_confirmed" carries
+    # this flag (24/24), every one with authority_incomplete/user_binding_pending
+    # (still unresolved) does not (18/18).
+    route_confirmed_precondition_changed = (
+        view.record_value("route_binding_order") is not None
+        and view.record_value("dispatch_authority_check") == "internal_binding_confirmed"
+    )
     if (
         "precondition" in values
         or invalidated_precondition
         or _stored_channel_ambiguous(view)
         or _guardrail_local_boundary_review(view)
         or _surface_resolved_channel_conflict(view)
+        or route_confirmed_precondition_changed
     ):
         flags.add("precondition_changed")
-    if _has_value(view, "redacted_summary_only", "summary_only", "minimal_disclosure", "식별 가능한 세부값을 제외"):
+    # Gated by not local_status: this text search matches substrings like
+    # "summary_only" inside unrelated compound values - a persistent_memory_write
+    # storing someone's enterprise_rule, or an external_share_policy value like
+    # "summary_only_allowed" (permissive, not restrictive). Both only showed up
+    # as false positives on local-only (status_only) proceed turns in dev, where
+    # nothing is actually being disclosed this turn anyway.
+    if not local_status and _has_value(view, "redacted_summary_only", "summary_only", "minimal_disclosure", "식별 가능한 세부값을 제외"):
         flags.add("minimal_disclosure")
     if _has_value(view, "privacy_rule_violation"):
         flags.add("safety")
@@ -923,7 +951,13 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
     violations: set[str] = set()
     if control == "hold" and ("precondition" in values or invalidated_precondition or "취소" in view.history_text or "취소" in view.prompt or types & PRECONDITION_RECORD_TYPES):
         flags.add("precondition_invalidated")
-        flags.discard("precondition_changed")
+        # Normally precondition_changed is superseded by precondition_invalidated
+        # under hold. But when route_confirmed_precondition_changed is what put
+        # precondition_changed there, dev's answers keep both side by side (see
+        # e55d2c79fb78/f40e956fa5cd) - the violation below documents that the
+        # *text-based* precondition signal was overridden, not the route one.
+        if not route_confirmed_precondition_changed:
+            flags.discard("precondition_changed")
         violations.add("precondition_changed_ignored")
     requires_confirmation = control == "ask" or (control != "hold" and "target_ambiguity" in flags)
     return {"risk_flags": sorted(flags), "violations": sorted(violations), "requires_confirmation": requires_confirmation}
