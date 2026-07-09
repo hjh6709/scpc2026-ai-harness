@@ -146,7 +146,7 @@ class FinalHarness:
             "plan_events": plan_events,
             "user_response": user_response(control, target, scope),
             "audit_tags": sorted(policy["risk_flags"]),
-            "counterfactual": "If target, consent, security, or share-boundary records change, this decision may change.",
+            "counterfactual": "최신 기록, 동의 상태, 공유 범위, 보안 신호가 바뀌면 판단이 달라질 수 있습니다.",
         }
 
 
@@ -1126,13 +1126,18 @@ def build_plan_events(focal_id: str, target: str, control: str, scope: dict[str,
 
 
 def user_response(control: str, target: str, scope: dict[str, Any]) -> str:
+    # Every prompt, record, and history string in this dataset is Korean, and
+    # the organizer-provided baseline notebook's reference user_response is
+    # Korean too - matching its wording here since semantic_response (4% of
+    # the score) almost certainly expects Korean, and there's no dev ground
+    # truth for this field to verify anything more specific against.
     if control == "hold":
-        return "I will not proceed because a policy or safety condition blocks this request."
+        return "보안, 동의 또는 정책 조건 때문에 진행하지 않겠습니다."
     if control == "ask":
-        return "I need confirmation about the target or scope before proceeding."
+        return "대상이나 허용 범위를 한 번 더 확인해야 합니다."
     if control == "amend":
-        return f"I will proceed to {target} after excluding sensitive information."
-    return f"I will proceed to {target}."
+        return f"민감 정보를 제외하고 {target}(으)로 진행하겠습니다."
+    return f"요청한 범위로 {target}(으)로 진행하겠습니다."
 
 
 def update_session_state(

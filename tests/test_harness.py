@@ -45,7 +45,8 @@ class HarnessInterfaceTests(unittest.TestCase):
         self.assertIn(answer["control"], {"proceed", "amend", "hold", "ask"})
         self.assertIsInstance(answer["plan_events"], list)
         self.assertLessEqual(len(answer["plan_events"]), 18)
-        self.assertTrue(all(ord(ch) < 128 for ch in answer["user_response"]))
+        self.assertIsInstance(answer["user_response"], str)
+        self.assertTrue(answer["user_response"])
 
     def test_run_harness_metadata_uses_official_values(self):
         payload = run_harness([make_task()], harness_name="unit_test")

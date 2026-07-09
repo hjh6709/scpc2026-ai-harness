@@ -118,6 +118,12 @@ dev 전체: 0.934(status_only 수정 전) → 0.9368 → 0.9384. policy 축 0.95
 
 dev 전체: 0.9389 → **0.9444** (control 축 100%, focal 100%, target 97.5%, content_scope 97.2%, policy 97.5%, plan 97.5%). screening 35개 태스크 추가 영향, `submission.csv` 갱신·커밋 완료.
 
+## "다른 방법도 찾아보자" 라운드 — user_response/counterfactual 언어 버그
+
+로컬 dev 지표(`allowed_fields_f1`/`control_exact`/`excluded_fields_f1`/`focal_exact`/`plan_verbs_f1`/`risk_flags_f1`/`violations_f1`)가 전부 1.000이 된 뒤, semantic_response(4% 가중치, 로컬에서 항상 0으로 측정 불가)를 다시 검토하다가 organizer가 제공한 `SCPC2026_Final_baseline.ipynb`에서 **공식 레퍼런스 `user_response` 구현이 한국어**라는 걸 발견 — 데이터셋 전체(prompt/history/TERMS_GUIDE)가 한국어인데 우리 `user_response`/`counterfactual`은 영어였다. baseline 문구 그대로 한국어로 교체(`user_response`: hold/ask/amend/proceed 4가지, `counterfactual`도 동일). ASCII 전용을 요구하던 기존 테스트(`test_final_harness_answer_shape`)는 근거 문서 어디에도 없는 임의 가정이었음을 확인(schema/TERMS_GUIDE 어디에도 ASCII 제약 없음, 제출 CSV 자체가 UTF-8) — 정정.
+
+부수적으로 baseline 노트북에서 `score_dev_submission`의 완전한 구현을 찾아 우리 `evaluate_dev.py`와 라인 단위로 대조 — 완전히 동일함을 확인(안심). 다만 baseline 주석에 "서버 공식 채점은 control 부분점수, content_scope 필드명 정규화, semantic_response(0.04)를 로컬 근사치가 완전히 반영하지 못해 서버 점수가 로컬보다 다소 높게 나올 수 있다"고 명시돼 있음 — 지금까지 걱정했던 "dev가 real보다 부풀려짐" 방향과 반대로, 구조적 하드코딩을 이미 다 제거한 지금 시점에선 **실제 제출 점수가 dev 0.9444보다 오히려 높을 가능성**을 시사.
+
 - **screening 정답 raw data가 없다.** 모든 검증은 간접적(구조 상관관계, dev와의 패턴 일치, 클러스터 내부 일관성)일 수밖에 없어서, 일부 수정(특히 `799c158`의 ask scope mode 판단)은 "다음 제출 전까지는 100% 확신 불가"인 상태로 남아있다.
 - **제출 횟수 제한**으로 실험적 변경을 남발하면 안 되고, 확신도 높은 변경을 모아서 배치로 제출하는 편이 낫다.
 - **대회 종료 시점**을 확인해서 남은 라운드 수를 가늠해야 한다 (현재 세션에서는 파악 못함).
