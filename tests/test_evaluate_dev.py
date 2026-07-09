@@ -33,6 +33,9 @@ def answer(
             {"verb": "read", "target": focal_id, "args": {"purpose": "inspect_task_context"}},
             {"verb": "dispatch", "target": target, "args": {"scope": "summary"}},
         ],
+        "user_response": f"I will proceed to {target}.",
+        "audit_tags": [],
+        "counterfactual": "If target, consent, security, or share-boundary records change, this decision may change.",
     }
 
 

@@ -4,6 +4,7 @@ import csv
 import json
 import re
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,14 @@ class TaskView:
     @property
     def record_types(self) -> set[str]:
         return {str(record.get("type")) for record in self.records}
+
+    @cached_property
+    def record_values_text(self) -> str:
+        # decide_control/build_content_scope/build_policy each call
+        # _record_values_text on the same TaskView instance per task, re-joining
+        # every record's text each time - cache it since records don't change
+        # after a TaskView is constructed.
+        return " ".join(text_of(record.get("value")) for record in self.records).lower()
 
     def record_value(self, record_type: str) -> Any:
         for record in reversed(self.records):
@@ -299,7 +308,7 @@ def choose_focal(view: TaskView) -> dict[str, Any]:
 
 
 def _record_values_text(view: TaskView) -> str:
-    return " ".join(text_of(record.get("value")) for record in view.records).lower()
+    return view.record_values_text
 
 
 def _has_value(view: TaskView, *needles: str) -> bool:
@@ -853,7 +862,13 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
     if control == "amend":
         needs_confirmation = _target_ambiguity_signal(view)
         return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": excluded or ["raw_quote"], "requires_user_confirmation": needs_confirmation}
-    if "raw" in _record_values_text(view) and not excluded:
+    # \b word boundaries so this only matches the standalone value "raw", not
+    # "_" -joined compounds like "raw_quote"/"raw_sensitive_forbidden" (verified
+    # unreachable on real dev+screening data either way - decide_control already
+    # routes any raw_*_forbidden record to a non-proceed control before this
+    # fallback is reached - but a bare substring match is a live risk against
+    # unseen data).
+    if re.search(r"\braw\b", _record_values_text(view)) and not excluded:
         return {"mode": "raw", "allowed_fields": ["raw"], "excluded_fields": [], "requires_user_confirmation": False}
     return {"mode": "summary", "allowed_fields": ["summary", "status"], "excluded_fields": excluded, "requires_user_confirmation": False}
 
@@ -1068,15 +1083,29 @@ def submission_answer(answer: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_turn_index(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _require_task_id(task: dict[str, Any]) -> str:
+    task_id = task.get("id")
+    if not task_id:
+        raise ValueError(f"task missing required 'id' field: {task!r}")
+    return str(task_id)
+
+
 def run_harness(tasks: list[dict[str, Any]], harness_cls: type = FinalHarness, *, harness_name: str = "scpc_rule_harness") -> dict[str, Any]:
-    ordered = sorted(tasks, key=lambda t: (str(t.get("session_id", "")), int(t.get("turn_index", 0)), str(t.get("id", ""))))
+    ordered = sorted(tasks, key=lambda t: (str(t.get("session_id", "")), _safe_turn_index(t.get("turn_index")), _require_task_id(t)))
     harness = harness_cls()
     sessions: dict[str, dict[str, Any]] = {}
     answers: dict[str, dict[str, Any]] = {}
     for task in ordered:
         sid = str(task.get("session_id", ""))
         session = sessions.setdefault(sid, {})
-        answers[str(task["id"])] = submission_answer(answer_one(harness, task, session))
+        answers[_require_task_id(task)] = submission_answer(answer_one(harness, task, session))
     payload = {
         "schema": SUBMISSION_SCHEMA,
         "meta": {
@@ -1089,7 +1118,7 @@ def run_harness(tasks: list[dict[str, Any]], harness_cls: type = FinalHarness, *
         },
         "answers": answers,
     }
-    validate_payload(payload, expected_ids={str(task["id"]) for task in tasks})
+    validate_payload(payload, expected_ids={_require_task_id(task) for task in tasks})
     return payload
 
 
@@ -1109,7 +1138,10 @@ def validate_payload(payload: dict[str, Any], expected_ids: set[str] | None = No
     if meta.get("uses_external_api") is not False or meta.get("temperature") != 0.0 or meta.get("seed") != 42:
         raise ValueError("official deterministic metadata is required")
     for task_id, answer in answers.items():
-        for field in ["focal_id", "target", "control", "content_scope", "policy", "plan_events"]:
+        for field in [
+            "focal_id", "target", "control", "content_scope", "policy", "plan_events",
+            "user_response", "audit_tags", "counterfactual",
+        ]:
             if field not in answer:
                 raise ValueError(f"{task_id} missing {field}")
         if answer["control"] not in VALID_CONTROLS:
@@ -1118,6 +1150,12 @@ def validate_payload(payload: dict[str, Any], expected_ids: set[str] | None = No
             raise ValueError(f"{task_id} has invalid scope mode")
         if not isinstance(answer.get("plan_events"), list) or len(answer["plan_events"]) > 18:
             raise ValueError(f"{task_id} has invalid plan_events")
+        if not isinstance(answer.get("user_response"), str) or not answer["user_response"]:
+            raise ValueError(f"{task_id} user_response must be a non-empty string")
+        if not isinstance(answer.get("audit_tags"), list):
+            raise ValueError(f"{task_id} audit_tags must be a list")
+        if not isinstance(answer.get("counterfactual"), str) or not answer["counterfactual"]:
+            raise ValueError(f"{task_id} counterfactual must be a non-empty string")
         validate_answer_consistency(str(task_id), answer)
 
 

@@ -391,6 +391,12 @@ class HarnessInterfaceTests(unittest.TestCase):
 
     def test_validate_payload_rejects_control_plan_contradictions(self):
         def payload_for(answer):
+            answer = {
+                "user_response": "placeholder",
+                "audit_tags": [],
+                "counterfactual": "placeholder",
+                **answer,
+            }
             return {
                 "schema": "scpc.final.answer.v1",
                 "meta": {
