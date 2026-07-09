@@ -43,6 +43,23 @@ python3 evaluate_dev.py \
 python3 -m unittest tests.test_harness -v
 ```
 
+## Diagnostics
+
+`diagnostics/trace_focal.py`, `diagnostics/trace_control.py`, and
+`diagnostics/trace_target.py` are branch-labeled mirrors of
+`choose_focal`/`decide_control`/`infer_target` - same logic, but each returns
+which internal branch fired alongside the answer, for reporting which
+resolution paths a task set actually exercises. `tests/test_diagnostics_drift.py`
+replays the real task set through both the real and traced functions and fails
+if they ever disagree, so a change to the real decision logic that isn't
+mirrored here gets caught instead of silently producing misleading reports.
+
+```bash
+python3 -m diagnostics.report --tasks "/Users/hanjeonghyun/Downloads/data 3/screening_tasks.jsonl"
+python3 -m diagnostics.report --tasks "/Users/hanjeonghyun/Downloads/data 3/screening_tasks.jsonl" \
+  --field control_branch --branch L35_fallthrough_proceed --sample 5
+```
+
 ## Submission Metadata
 
 The generated JSON uses:
