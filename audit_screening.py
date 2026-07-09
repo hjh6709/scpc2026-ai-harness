@@ -94,10 +94,10 @@ def rule_coverage(tasks: list[dict[str, Any]]) -> dict[str, int]:
         # miss), and that wrong policy would then get written into session
         # state, skewing every later task in the same session that reads it.
         evidence = slm.summarize_task(t)
-        control = H.decide_control(view, focal, evidence, session)
+        control = H.decide_control(view, focal, evidence, session, user_memory)
         target = H.infer_target(view, focal, control, session, user_memory)
         scope = H.build_content_scope(view, focal, control, evidence)
-        policy = H.build_policy(view, focal, control, scope, evidence)
+        policy = H.build_policy(view, focal, control, scope, evidence, user_memory)
         H.update_session_state(view, session, focal.get("id", ""), target, control, scope, policy)
         H.update_session_memory(view, session, user_memory)
     return counts

@@ -36,12 +36,17 @@ from harness import (
     _summary_only_composite_plan,
     _surface_resolved_channel_conflict,
     _temporary_privacy_override,
+    _unaddressed_prior_failure_recall,
     contained_fields,
 )
 
 
 def decide_control_traced(
-    view: TaskView, focal: dict[str, Any], evidence: dict[str, Any], session: dict[str, Any] | None = None
+    view: TaskView,
+    focal: dict[str, Any],
+    evidence: dict[str, Any],
+    session: dict[str, Any] | None = None,
+    user_memory: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     session = session or {}
     types = view.record_types
@@ -51,6 +56,8 @@ def decide_control_traced(
         return "proceed", "L01_is_local_update"
     if {"security_alert", "safety_mode"} & types or "phishing" in values or "피싱" in values or "impersonation" in values:
         return "hold", "L02_security_alert"
+    if _unaddressed_prior_failure_recall(view, user_memory):
+        return "hold", "L02b_unaddressed_prior_failure_recall"
     if _prior_hold_followup(view, session) or _prior_local_only_external_followup(view, session):
         return "ask", "L03_prior_followup"
     if "privacy_guard" in types:

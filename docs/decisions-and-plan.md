@@ -102,6 +102,22 @@ python3 audit_screening.py --tasks ".../screening_tasks.jsonl" --dev-tasks ".../
 
 dev 전체: 0.934(status_only 수정 전) → 0.9368 → 0.9384. policy 축 0.9567→0.9632, risk_flags_f1 0.975→(개선). 남은 dev 불일치 12건 — 대부분 n=1~2 표본(개별 case별로 서로 다른 예외 신호가 필요해 보이고, 일반화 가능한 패턴을 못 찾음)이라 과적합 위험 대비 추가 조사 중단. screening 109개(15.6%) 태스크 영향(이번 라운드 전체), `submission.csv` 갱신 완료.
 
+## "일반화 가능한 패턴을 못 찾았으면 이유를 찾으라"는 지적 이후 재조사
+
+이전 라운드에서 12개 dev 불일치를 "표본이 작아 과적합 위험" 이유로 보류했는데, 사용자가 "포기 말고 이유를 찾으라"고 지적 — 각 케이스를 근접한 dev 예시와 필드 단위로 전수 비교해서 다시 파봄. 이번에도 전부 최종 규칙은 해당 전체 모집단(n=6~40) 대조 0 mismatch 확인 후 적용:
+
+1. **`b0696e0a0b55`/`d2a3fd50f334`** (missing external_share): `local_status`가 `share_boundary_update=="local_update_boundary"`라는 구조적 레코드만으로 True가 되고 있었는데, 이 두 태스크는 그걸 뒷받침하는 텍스트("보내지 말고"류)가 아예 없었음 — 반면 이미 맞던 케이스들은 전부 그 텍스트가 있었음. `control=="proceed" and local_status and not _is_local_update(view)` → external_share 추가. **dev 40/40**(proceed+local_status 전체).
+2. **`1ada8b6f857e`/`b350a6b5a5ff`** (extra precondition_changed): `_external_binding_blocked`가 정상적으론 hold를 유발하는 신호인데, `_is_local_update`가 먼저 control을 proceed로 확정시켜버려 무의미해진 뒤에도 `precondition_changed` 계산엔 여전히 기여하고 있었음. hold는 구조상 `_is_local_update`가 항상 False일 때만 나오므로, `_external_binding_blocked(view) and not _is_local_update(view)`로 게이팅해도 hold 케이스엔 영향 없음 — **dev 7/7**(해당 신호가 True인 전체) mismatch 0.
+3. **`5181075801a4`** (excluded_fields): doctor_note 분기가 이미 두 문구를 인식하는 `_doctor_note_external_scope_uncertain`을 쓰면서, 그 위에 불필요하게 좁은 문구("새 전제가 확정되지") 하나만 추가로 요구하던 중복 조건 제거. excluded_fields는 문구와 무관하게 고정, mode만 문구별로 분기.
+4. **`083ee82f08f6`** (external_share/local_only): `persistent_memory_recall`이 있는 ask 케이스는 `_condition_uncertain`과 무관하게 항상 external_share를 유지해야 함(cross-session 메모리를 참조하는 시점에 이미 외부 공유 쪽으로 가고 있었으므로) — 기존 discard 규칙의 예외 목록(`ambiguous_focal`/`target_changed_after_turn`)에 추가. **dev 4/4**(ask+persistent_memory_recall 전체) mismatch 0.
+5. **`0937ccedef94`** (control: hold, n=1처럼 보였던 것): 현재 턴 텍스트엔 hold 근거가 전혀 없고 다른 세션에서 recall된 `last_failure_reason`(과거 실패 이력)과 "바로"(확인 생략 요청)의 조합으로만 설명됨. **screening에서 완전히 동일한 템플릿(`ec6febf11406`, "~에게 ~쿠폰을 바로 보내줘. 예전에 말한 취향이 있으면 반영해.")을 발견해 n=1이 아니라 템플릿 매치임을 확인**. 같은 조합을 가진 dev 나머지 9개(`persistent_memory_recall`+`last_failure_reason` 존재)는 전부 이미 다른 경로로 정답이었음을 먼저 확인해 광범위한 규칙이 아님을 검증한 뒤, "바로"가 있고 명시적 확인 요청 문구가 없을 때만 hold로 좁혀 적용. `decide_control`/`build_policy`에 `user_memory` 파라미터 추가.
+
+**남은 4건**(31fb29f3b379 mode 노이즈, a7f2a443f654/6903fe98eb6a/511b1dc0b84d target)은 "왜 안 되는지"까지 재확인 완료:
+- `31fb29f3b379`: "점검 내용" 트리거 단어 자체가 dev 전체(n=3)에서 2:1로 갈리고, `session_share_policy`로 넓혀 봐도(n=24) 11개 불일치 — 단일/이중 필드로 환원 안 되는 진짜 노이즈로 결론.
+- target 3건: `personal_memory` 필드(전부 빈 배열), 같은 사람 이름의 다른 프로필까지 교차 대조했지만(jimin은 dev+screening에 다른 프로필 3개 있음) 값이 다 다름 — 유일하게 검증 가능한 dev 사례(`7efad6a5e982`)로 재확인한 결과 애초에 쓰던 필드(`health_channel`)가 맞고 대안(`checkup_place`)은 틀렸을 것임을 확인, 우연의 일치였을 뿐 실제 데이터 자체가 없음이 최종 결론.
+
+dev 전체: 0.9389 → **0.9444** (control 축 100%, focal 100%, target 97.5%, content_scope 97.2%, policy 97.5%, plan 97.5%). screening 35개 태스크 추가 영향, `submission.csv` 갱신·커밋 완료.
+
 - **screening 정답 raw data가 없다.** 모든 검증은 간접적(구조 상관관계, dev와의 패턴 일치, 클러스터 내부 일관성)일 수밖에 없어서, 일부 수정(특히 `799c158`의 ask scope mode 판단)은 "다음 제출 전까지는 100% 확신 불가"인 상태로 남아있다.
 - **제출 횟수 제한**으로 실험적 변경을 남발하면 안 되고, 확신도 높은 변경을 모아서 배치로 제출하는 편이 낫다.
 - **대회 종료 시점**을 확인해서 남은 라운드 수를 가늠해야 한다 (현재 세션에서는 파악 못함).

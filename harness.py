@@ -130,10 +130,10 @@ class FinalHarness:
         view = TaskView(task)
         focal = choose_focal(view)
         focal_id = str(focal.get("id") or "")
-        control = decide_control(view, focal, evidence, session)
+        control = decide_control(view, focal, evidence, session, self.user_memory)
         target = infer_target(view, focal, control, session, self.user_memory)
         scope = build_content_scope(view, focal, control, evidence)
-        policy = build_policy(view, focal, control, scope, evidence)
+        policy = build_policy(view, focal, control, scope, evidence, self.user_memory)
         plan_events = build_plan_events(focal_id, target, control, scope, policy)
         update_session_state(view, session, focal_id, target, control, scope, policy)
         update_session_memory(view, session, self.user_memory)
@@ -619,6 +619,27 @@ def _explicit_user_confirmation_requested(view: TaskView) -> bool:
     return any(word in view.prompt.lower() for word in ["누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인", "다시 확인"])
 
 
+def _unaddressed_prior_failure_recall(view: TaskView, user_memory: dict[str, Any] | None) -> bool:
+    # "바로" (do it right away) paired with a persistent_memory_recall whose
+    # profile has a recorded last_failure_reason from a *different* session:
+    # dev-verified (and confirmed by an identically-templated screening task)
+    # that this combination means hold, unless the current prompt already
+    # asks for confirmation itself (that's handled separately by the
+    # "requires_confirmation"/_explicit_user_confirmation_requested paths).
+    # Checked against every other dev task with a persistent_memory_recall +
+    # last_failure_reason profile (9 of them) - none of those want hold from
+    # this signal alone, only this "바로"+no-confirmation-ask combination does.
+    if not user_memory or "바로" not in view.prompt:
+        return False
+    recall = view.record_value("persistent_memory_recall")
+    if not isinstance(recall, dict) or not recall.get("memory_key"):
+        return False
+    memory = user_memory.get(str(recall["memory_key"]))
+    if not isinstance(memory, dict) or not memory.get("last_failure_reason"):
+        return False
+    return not _explicit_user_confirmation_requested(view) and "물어봐" not in view.prompt
+
+
 def infer_target(
     view: TaskView,
     focal: dict[str, Any],
@@ -706,7 +727,13 @@ def infer_target(
     return str(session.get("last_target") or "user")
 
 
-def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, Any], session: dict[str, Any] | None = None) -> str:
+def decide_control(
+    view: TaskView,
+    focal: dict[str, Any],
+    evidence: dict[str, Any],
+    session: dict[str, Any] | None = None,
+    user_memory: dict[str, Any] | None = None,
+) -> str:
     session = session or {}
     types = view.record_types
     values = _record_values_text(view)
@@ -714,6 +741,8 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
     if _is_local_update(view):
         return "proceed"
     if {"security_alert", "safety_mode"} & types or "phishing" in values or "피싱" in values or "impersonation" in values:
+        return "hold"
+    if _unaddressed_prior_failure_recall(view, user_memory):
         return "hold"
     if _prior_hold_followup(view, session) or _prior_local_only_external_followup(view, session):
         return "ask"
@@ -812,8 +841,15 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
         return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": ["name"], "requires_user_confirmation": True}
     if control == "ask" and view.record_value("external_share_policy") == "raw_quote_forbidden" and _condition_uncertain(view):
         return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
-    if control == "ask" and _doctor_note_external_scope_uncertain(view, focal) and _has_value(view, "새 전제가 확정되지"):
-        return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
+    if control == "ask" and _doctor_note_external_scope_uncertain(view, focal):
+        # excluded_fields is always ["raw_quote"] here regardless of phrasing
+        # (dev-verified across both phrasings this predicate matches), but mode
+        # still tracks which specific confirmation phrase appears - "새 전제가
+        # 확정되지" implies content already looks redacted-ready, "누구에게 어떤
+        # 범위" is asking about scope/target more broadly (dev: redacted vs
+        # summary respectively).
+        mode = "redacted" if _has_value(view, "새 전제가 확정되지") else "summary"
+        return {"mode": mode, "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
     if control == "ask" and _guardrail_ladder(view):
         if view.record_value("share_boundary_update") == "redacted_external_boundary" and _confirmation_precondition(view):
             return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
@@ -885,7 +921,14 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
     return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": excluded, "requires_user_confirmation": False}
 
 
-def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
+def build_policy(
+    view: TaskView,
+    focal: dict[str, Any],
+    control: str,
+    scope: dict[str, Any],
+    evidence: dict[str, Any],
+    user_memory: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     flags = set(evidence.get("risk_flags") or [])
     flags.discard("security_alert")
     flags.discard("sensitive_content")
@@ -899,6 +942,14 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         flags.add("strict_share_policy")
     if local_status:
         flags.add("local_only")
+    # local_status can come from a structural record (share_boundary_update==
+    # "local_update_boundary") with no matching text ever telling the user not
+    # to share - _is_local_update's own text check is what actually promises
+    # "nothing leaves the device". When that text is absent, external_share
+    # still applies alongside local_only rather than being suppressed by it -
+    # dev-verified 0/40 across every proceed+local_status task.
+    if control == "proceed" and local_status and not _is_local_update(view):
+        flags.add("external_share")
     if not local_status and (types & EXTERNAL_RECORD_TYPES or "external" in values or "외부" in view.prompt):
         flags.add("external_share")
     if not local_status and "persistent_memory_recall" in types and control in {"ask", "amend", "hold"}:
@@ -929,6 +980,12 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
         and (_condition_uncertain(view) or _confirmation_precondition(view) or _doctor_note_external_scope_uncertain(view, focal) or "duration_ambiguous" in types)
         and "ambiguous_focal" not in types
         and "target_changed_after_turn" not in types
+        # dev-verified 4/4: an ask that's recalling a persistent cross-session
+        # memory was already headed toward that recalled (external) target -
+        # the uncertainty is about proceeding, not about whether sharing was
+        # ever in play, so it keeps external_share like the ambiguous_focal/
+        # target_changed_after_turn cases above.
+        and "persistent_memory_recall" not in types
     ):
         flags.discard("external_share")
         flags.add("local_only")
@@ -964,13 +1021,21 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
     # every control=="ask"+mode=="redacted" dev task omits this flag).
     if control == "amend" or (scope.get("mode") == "redacted" and control != "ask"):
         flags.add("minimal_disclosure")
+    # _external_binding_blocked normally means decide_control would return
+    # "hold" - but _is_local_update is checked first there, so when it's True
+    # the control is "proceed" regardless and the blocked-binding signal never
+    # actually applied. Gating it here matters only for non-hold controls
+    # (hold implies _is_local_update is already False, since decide_control
+    # would have returned "proceed" first otherwise) - dev-verified: fixes
+    # 1ada8b6f857e/b350a6b5a5ff (both proceed) with 0 new mismatches elsewhere.
     invalidated_precondition = (
         _precondition_invalidated(view)
         or _doctor_note_external_precondition_invalidated(view, focal)
         or _child_sleep_lighting_memory_block(view)
         or _guardrail_blocked_binding(view)
-        or _external_binding_blocked(view)
+        or (_external_binding_blocked(view) and not _is_local_update(view))
         or _revoked_or_security_precondition(view)
+        or _unaddressed_prior_failure_recall(view, user_memory)
     )
     # A route binding that just got confirmed (internal_binding_confirmed) means
     # whatever precondition was open (which candidate/authority applies) just

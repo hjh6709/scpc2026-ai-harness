@@ -55,10 +55,10 @@ def run_traced(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # narrower record-only checks in build_policy itself miss).
         evidence = slm.summarize_task(task)
         focal, focal_branch = choose_focal_traced(view)
-        control, control_branch = decide_control_traced(view, focal, evidence, session)
+        control, control_branch = decide_control_traced(view, focal, evidence, session, user_memory)
         target, target_branch = infer_target_traced(view, focal, control, session, user_memory)
         scope = build_content_scope(view, focal, control, evidence)
-        policy = build_policy(view, focal, control, scope, evidence)
+        policy = build_policy(view, focal, control, scope, evidence, user_memory)
 
         rows.append(
             {
