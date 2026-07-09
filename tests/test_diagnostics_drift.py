@@ -24,6 +24,7 @@ from diagnostics.trace_control import decide_control_traced
 from diagnostics.trace_focal import choose_focal_traced
 from diagnostics.trace_target import infer_target_traced
 from harness import (
+    FixedSLMClient,
     TaskView,
     build_content_scope,
     build_policy,
@@ -61,6 +62,7 @@ class TracedFunctionsMatchRealFunctionsTests(unittest.TestCase):
         )
         sessions: dict[str, dict] = {}
         user_memory: dict = {}
+        slm = FixedSLMClient()
         focal_mismatches = []
         control_mismatches = []
         target_mismatches = []
@@ -69,14 +71,20 @@ class TracedFunctionsMatchRealFunctionsTests(unittest.TestCase):
             session_id = str(task.get("session_id", ""))
             session = sessions.setdefault(session_id, {})
             view = TaskView(task)
+            # Real evidence, matching FinalHarness.answer_task - decide_control
+            # itself ignores it, but the policy/scope it feeds into session
+            # state affects later same-session tasks' session-dependent
+            # predicates, so an evidence-less replay here could quietly drift
+            # from what run_harness actually threads through.
+            evidence = slm.summarize_task(task)
 
             real_focal = choose_focal(view)
             traced_focal, _focal_branch = choose_focal_traced(view)
             if real_focal != traced_focal:
                 focal_mismatches.append(task["id"])
 
-            real_control = decide_control(view, real_focal, {}, session)
-            traced_control, _control_branch = decide_control_traced(view, real_focal, {}, session)
+            real_control = decide_control(view, real_focal, evidence, session)
+            traced_control, _control_branch = decide_control_traced(view, real_focal, evidence, session)
             if real_control != traced_control:
                 control_mismatches.append(task["id"])
 
@@ -85,8 +93,8 @@ class TracedFunctionsMatchRealFunctionsTests(unittest.TestCase):
             if real_target != traced_target:
                 target_mismatches.append(task["id"])
 
-            scope = build_content_scope(view, real_focal, real_control, {})
-            policy = build_policy(view, real_focal, real_control, scope, {})
+            scope = build_content_scope(view, real_focal, real_control, evidence)
+            policy = build_policy(view, real_focal, real_control, scope, evidence)
             update_session_state(view, session, real_focal.get("id", ""), real_target, real_control, scope, policy)
             update_session_memory(view, session, user_memory)
 

@@ -22,6 +22,7 @@ from diagnostics.trace_control import decide_control_traced
 from diagnostics.trace_focal import choose_focal_traced
 from diagnostics.trace_target import infer_target_traced
 from harness import (
+    FixedSLMClient,
     TaskView,
     build_content_scope,
     build_policy,
@@ -40,17 +41,24 @@ def run_traced(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
     sessions: dict[str, dict[str, Any]] = {}
     user_memory: dict[str, Any] = {}
+    slm = FixedSLMClient()
     rows = []
     for task in ordered:
         session_id = str(task.get("session_id", ""))
         session = sessions.setdefault(session_id, {})
         view = TaskView(task)
 
+        # FinalHarness.answer_task always computes real evidence before calling
+        # build_content_scope/build_policy - {} here would silently under-report
+        # branches those functions can only reach via evidence (e.g. evidence's
+        # broader view.all_text scan catches some external_share cases the
+        # narrower record-only checks in build_policy itself miss).
+        evidence = slm.summarize_task(task)
         focal, focal_branch = choose_focal_traced(view)
-        control, control_branch = decide_control_traced(view, focal, {}, session)
+        control, control_branch = decide_control_traced(view, focal, evidence, session)
         target, target_branch = infer_target_traced(view, focal, control, session, user_memory)
-        scope = build_content_scope(view, focal, control, {})
-        policy = build_policy(view, focal, control, scope, {})
+        scope = build_content_scope(view, focal, control, evidence)
+        policy = build_policy(view, focal, control, scope, evidence)
 
         rows.append(
             {

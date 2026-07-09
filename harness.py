@@ -1054,18 +1054,27 @@ def update_session_state(
     session["route_confirmed"] = _has_value(view, *ROUTE_CONFIRMED_VALUES)
 
 
+def _deep_update(existing: dict[str, Any], new_data: dict[str, Any]) -> None:
+    for k, v in new_data.items():
+        if isinstance(v, dict) and isinstance(existing.get(k), dict):
+            _deep_update(existing[k], v)
+        else:
+            existing[k] = v
+
+
 def update_session_memory(view: TaskView, session: dict[str, Any], user_memory: dict[str, Any]) -> None:
     value = view.record_value("persistent_memory_write")
     if isinstance(value, dict):
         key = str(value.get("memory_key") or value.get("person") or view.task_id)
         # Every dev+screening memory_key is currently written exactly once (a
-        # single full profile bundle, never a partial update across turns), so
-        # this merge is a no-op on real data - but a second write to the same
-        # key overwriting the whole dict would silently drop any field only the
-        # first write had, for an unseen task stream that does update partially.
+        # single flat profile bundle with no nested dict values, never a
+        # partial update across turns), so this merge is a no-op on real data -
+        # but a second write to the same key overwriting the whole dict would
+        # silently drop any field (nested or not) only the first write had, for
+        # an unseen task stream that does update partially.
         existing = user_memory.get(key)
         if isinstance(existing, dict):
-            existing.update(value)
+            _deep_update(existing, value)
         else:
             user_memory[key] = value
         session["last_memory_key"] = key

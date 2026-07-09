@@ -73,6 +73,7 @@ def rule_coverage(tasks: list[dict[str, Any]]) -> dict[str, int]:
     ordered = sorted(tasks, key=lambda t: (str(t.get("session_id", "")), int(t.get("turn_index", 0)), str(t.get("id", ""))))
     sessions: dict[str, dict[str, Any]] = {}
     user_memory: dict[str, Any] = {}
+    slm = H.FixedSLMClient()
     for t in ordered:
         sid = str(t.get("session_id", ""))
         session = sessions.setdefault(sid, {})
@@ -87,10 +88,16 @@ def rule_coverage(tasks: list[dict[str, Any]]) -> dict[str, int]:
         for name in GATE_FUNCTIONS_VIEW_SESSION:
             if getattr(H, name)(view, session):
                 counts[name] += 1
-        control = H.decide_control(view, focal, {}, session)
+        # Real evidence, matching FinalHarness.answer_task - {} here would
+        # compute a scope/policy that can differ from the real one (evidence's
+        # broader view.all_text scan reaches some flags record-only checks
+        # miss), and that wrong policy would then get written into session
+        # state, skewing every later task in the same session that reads it.
+        evidence = slm.summarize_task(t)
+        control = H.decide_control(view, focal, evidence, session)
         target = H.infer_target(view, focal, control, session, user_memory)
-        scope = H.build_content_scope(view, focal, control, {})
-        policy = H.build_policy(view, focal, control, scope, {})
+        scope = H.build_content_scope(view, focal, control, evidence)
+        policy = H.build_policy(view, focal, control, scope, evidence)
         H.update_session_state(view, session, focal.get("id", ""), target, control, scope, policy)
         H.update_session_memory(view, session, user_memory)
     return counts
