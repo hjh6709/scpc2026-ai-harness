@@ -92,6 +92,16 @@ python3 audit_screening.py --tasks ".../screening_tasks.jsonl" --dev-tasks ".../
 
 ## 제약과 리스크
 
+## 추가 policy.risk_flags 정밀화 (같은 "점수 올릴 부분 고안" 라운드 계속)
+
+`status_only` excluded_fields 수정 이후 `evaluate_dev.py`로 남은 불일치를 다시 훑어서 3건 더 찾아 고침 (전부 dev 전수 대조, 표본 크기와 mismatch=0 명시):
+
+1. **`allowed_fields` 마지막 fallback**: `["summary", "status"]`였는데 dev 2/2(해당 fallback에 도달하는 순수 케이스 전부)가 `["summary"]`만 원함 — `"status"` 제거.
+2. **`hold`의 `external_share`/`local_only`**: `_precondition_invalidated(view)`가 True면(사용자 자신의 요청 전제가 취소/무효화된 경우, 애초에 나갈 데가 없었음) `local_only`만, False면(security_alert/consent 철회/route 모호성 등으로 막힌 경우, 원래 외부로 나갈 뻔한 걸 막은 것) `external_share`를 붙임 — dev 18/18(hold 전체) 완벽 일치. `route_candidate_snapshot="external_candidates_present"`가 "external"을 부분 문자열로 포함해 기존 텍스트 매칭 규칙이 먼저 잘못 추가해버리는 걸 override 형태로 정리.
+3. **`ask`+`ambiguous_focal`의 `external_share`/`local_only`**: 같은 `_explicit_user_confirmation_requested` predicate(오늘 세션 초반 target 필드에서 검증했던 것과 동일)로 분기 — 명시적 "사용자 확인" 문구가 있으면 `local_only`, 없으면 기본이 `external_share` — dev 7/7(ask+ambiguous_focal 전체) 완벽 일치.
+
+dev 전체: 0.934(status_only 수정 전) → 0.9368 → 0.9384. policy 축 0.9567→0.9632, risk_flags_f1 0.975→(개선). 남은 dev 불일치 12건 — 대부분 n=1~2 표본(개별 case별로 서로 다른 예외 신호가 필요해 보이고, 일반화 가능한 패턴을 못 찾음)이라 과적합 위험 대비 추가 조사 중단. screening 109개(15.6%) 태스크 영향(이번 라운드 전체), `submission.csv` 갱신 완료.
+
 - **screening 정답 raw data가 없다.** 모든 검증은 간접적(구조 상관관계, dev와의 패턴 일치, 클러스터 내부 일관성)일 수밖에 없어서, 일부 수정(특히 `799c158`의 ask scope mode 판단)은 "다음 제출 전까지는 100% 확신 불가"인 상태로 남아있다.
 - **제출 횟수 제한**으로 실험적 변경을 남발하면 안 되고, 확신도 높은 변경을 모아서 배치로 제출하는 편이 낫다.
 - **대회 종료 시점**을 확인해서 남은 라운드 수를 가늠해야 한다 (현재 세션에서는 파악 못함).

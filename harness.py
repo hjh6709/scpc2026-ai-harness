@@ -882,7 +882,7 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
     # unseen data).
     if re.search(r"\braw\b", _record_values_text(view)) and not excluded:
         return {"mode": "raw", "allowed_fields": ["raw"], "excluded_fields": [], "requires_user_confirmation": False}
-    return {"mode": "summary", "allowed_fields": ["summary", "status"], "excluded_fields": excluded, "requires_user_confirmation": False}
+    return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": excluded, "requires_user_confirmation": False}
 
 
 def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
@@ -909,6 +909,21 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
     # external-share risk regardless of local_status - dev-verified 28/28.
     if control == "amend":
         flags.add("external_share")
+    # dev-verified 18/18, overriding any of the above (e.g. a route_candidate_
+    # snapshot value like "external_candidates_present" contains "external" as
+    # a substring and would otherwise add this via the generic text match
+    # above): a hold whose precondition wasn't explicitly invalidated
+    # (security_alert/consent/route ambiguity/etc, rather than the user's own
+    # premise falling apart) was still headed somewhere external before being
+    # blocked - the flag documents the averted risk. A hold from an
+    # invalidated precondition never had anywhere to go, so it's local_only
+    # only.
+    if control == "hold":
+        if _precondition_invalidated(view):
+            flags.discard("external_share")
+            flags.add("local_only")
+        else:
+            flags.add("external_share")
     if (
         control == "ask"
         and (_condition_uncertain(view) or _confirmation_precondition(view) or _doctor_note_external_scope_uncertain(view, focal) or "duration_ambiguous" in types)
@@ -917,6 +932,19 @@ def build_policy(view: TaskView, focal: dict[str, Any], control: str, scope: dic
     ):
         flags.discard("external_share")
         flags.add("local_only")
+    # The generic rule above deliberately excludes ambiguous_focal (that
+    # ambiguity is normally about which object, not whether sharing happens -
+    # see infer_target's matching guard). dev-verified 0/7 across every ask+
+    # ambiguous_focal dev task: it's external_share by default (still headed
+    # somewhere external, just unsure which object), unless there's ALSO an
+    # explicit "check with the user first" phrase, which shifts it to
+    # local_only same as the generic rule above.
+    if control == "ask" and "ambiguous_focal" in types:
+        if _explicit_user_confirmation_requested(view):
+            flags.discard("external_share")
+            flags.add("local_only")
+        else:
+            flags.add("external_share")
     if control == "ask" and _guardrail_ladder(view) and _confirmation_precondition(view):
         flags.discard("external_share")
         flags.add("local_only")
