@@ -64,8 +64,18 @@ KNOWN_SENSITIVE_FIELDS = SENSITIVE_FIELDS
 
 
 def rule_coverage(tasks: list[dict[str, Any]]) -> dict[str, int]:
+    # GATE_FUNCTIONS_VIEW_SESSION predicates read session["last_control"] etc,
+    # which only holds real values once tasks are replayed in the same
+    # session_id/turn_index order run_harness uses - an isolated {} per task
+    # makes these look permanently dead (found the hard way: they fire 61x on
+    # screening once threaded correctly, not 0x).
     counts: dict[str, int] = {name: 0 for name in GATE_FUNCTIONS_VIEW + GATE_FUNCTIONS_VIEW_FOCAL + GATE_FUNCTIONS_VIEW_SESSION}
-    for t in tasks:
+    ordered = sorted(tasks, key=lambda t: (str(t.get("session_id", "")), int(t.get("turn_index", 0)), str(t.get("id", ""))))
+    sessions: dict[str, dict[str, Any]] = {}
+    user_memory: dict[str, Any] = {}
+    for t in ordered:
+        sid = str(t.get("session_id", ""))
+        session = sessions.setdefault(sid, {})
         view = TaskView(t)
         focal = choose_focal(view)
         for name in GATE_FUNCTIONS_VIEW:
@@ -75,8 +85,14 @@ def rule_coverage(tasks: list[dict[str, Any]]) -> dict[str, int]:
             if getattr(H, name)(view, focal):
                 counts[name] += 1
         for name in GATE_FUNCTIONS_VIEW_SESSION:
-            if getattr(H, name)(view, {}):
+            if getattr(H, name)(view, session):
                 counts[name] += 1
+        control = H.decide_control(view, focal, {}, session)
+        target = H.infer_target(view, focal, control, session, user_memory)
+        scope = H.build_content_scope(view, focal, control, {})
+        policy = H.build_policy(view, focal, control, scope, {})
+        H.update_session_state(view, session, focal.get("id", ""), target, control, scope, policy)
+        H.update_session_memory(view, session, user_memory)
     return counts
 
 

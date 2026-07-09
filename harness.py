@@ -122,7 +122,7 @@ class FinalHarness:
         focal = choose_focal(view)
         focal_id = str(focal.get("id") or "")
         control = decide_control(view, focal, evidence, session)
-        target = infer_target(view, focal, control, session)
+        target = infer_target(view, focal, control, session, self.user_memory)
         scope = build_content_scope(view, focal, control, evidence)
         policy = build_policy(view, focal, control, scope, evidence)
         plan_events = build_plan_events(focal_id, target, control, scope, policy)
@@ -610,7 +610,13 @@ def _explicit_user_confirmation_requested(view: TaskView) -> bool:
     return any(word in view.prompt.lower() for word in ["누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인", "다시 확인"])
 
 
-def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: dict[str, Any]) -> str:
+def infer_target(
+    view: TaskView,
+    focal: dict[str, Any],
+    control: str,
+    session: dict[str, Any],
+    user_memory: dict[str, Any] | None = None,
+) -> str:
     # Target is always derived from structured task signals (resolved_target record,
     # target_changed_after_turn record, or object attrs) — never a guessed domain name,
     # since guessed vocabulary only matches the specific wording it was tuned against.
@@ -626,9 +632,43 @@ def infer_target(view: TaskView, focal: dict[str, Any], control: str, session: d
 
     resolved_value = _resolved_target_value(view.record_value("resolved_target"))
 
+    # A persistent_memory_recall pointing at a memory_key written by an earlier
+    # task in a *different* session (see FinalHarness.user_memory) carries the
+    # target - which field of that write applies depends on why this turn is
+    # recalling it, per memory_class/request phrasing (dev-verified against every
+    # dev task where the referenced write is actually reachable). This substantive
+    # target survives the generic "ask" confirmation gate below - unlike a directly
+    # stated resolved_target, a memory-recalled one represents "what we'd naturally
+    # reuse," with the ask/uncertainty layered on top as a confirmation step rather
+    # than a sign the target itself is unknown (plan_events still clarifies to
+    # "user" regardless).
+    recall = view.record_value("persistent_memory_recall")
+    recalled_value = ""
+    if isinstance(recall, dict) and recall.get("memory_key") and user_memory:
+        memory = user_memory.get(str(recall["memory_key"]))
+        if isinstance(memory, dict):
+            memory_class = str(recall.get("memory_class") or "")
+            if memory_class == "standing_constraint" and memory.get("approval_channel"):
+                recalled_value = str(memory["approval_channel"])
+            elif memory_class == "prior_result" and memory.get("last_success_target"):
+                recalled_value = str(memory["last_success_target"])
+            elif _has_value(view, "조명") and memory.get("dusk_room"):
+                recalled_value = str(memory["dusk_room"])
+            elif _has_value(view, "검진", "점검") and memory.get("health_channel"):
+                recalled_value = str(memory["health_channel"])
+            elif memory.get("preferred_channel"):
+                recalled_value = str(memory["preferred_channel"])
+    if recalled_value:
+        return recalled_value
+
     # A resolved target survives a generic "confirmation needed" signal when the
     # ambiguity is about which focal object to use, not about the target itself.
-    if control == "ask" and "ambiguous_focal" in view.record_types and resolved_value:
+    if (
+        control == "ask"
+        and "ambiguous_focal" in view.record_types
+        and resolved_value
+        and not _explicit_user_confirmation_requested(view)
+    ):
         return resolved_value
 
     if control == "ask" and (
