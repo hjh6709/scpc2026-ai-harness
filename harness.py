@@ -972,6 +972,9 @@ def submission_answer(answer: dict[str, Any]) -> dict[str, Any]:
         "content_scope": answer.get("content_scope") or {},
         "policy": answer.get("policy") or {},
         "plan_events": answer.get("plan_events") or [],
+        "user_response": str(answer.get("user_response") or ""),
+        "audit_tags": answer.get("audit_tags") or [],
+        "counterfactual": str(answer.get("counterfactual") or ""),
     }
 
 
