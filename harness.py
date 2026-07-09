@@ -636,27 +636,36 @@ def infer_target(
     # A persistent_memory_recall pointing at a memory_key written by an earlier
     # task in a *different* session (see FinalHarness.user_memory) carries the
     # target - which field of that write applies depends on why this turn is
-    # recalling it, per memory_class/request phrasing (dev-verified against every
-    # dev task where the referenced write is actually reachable). This substantive
-    # target survives the generic "ask" confirmation gate below - unlike a directly
-    # stated resolved_target, a memory-recalled one represents "what we'd naturally
-    # reuse," with the ask/uncertainty layered on top as a confirmation step rather
-    # than a sign the target itself is unknown (plan_events still clarifies to
-    # "user" regardless).
+    # recalling it. The first two branches key off memory_class, an explicit
+    # field on the recall record itself (structural, not text-matched). The
+    # third keys off the focal object's own declared type/action - also
+    # structural, not a Korean keyword match against the prompt - so it stays
+    # meaningful even if a hidden task phrases the same request differently.
+    # A prior "검진/점검"(checkup)-worded text-only branch routing to
+    # memory["health_channel"] was removed: unlike the lighting case, no
+    # object-level field distinguishes a checkup request from any other, so
+    # that branch was pure prompt-keyword matching validated on a single dev
+    # case - and that case's health_channel value happened to equal its
+    # preferred_channel anyway, so the generic fallback below already covers
+    # it without the extra risk. This substantive target survives the
+    # generic "ask" confirmation gate below - unlike a directly stated
+    # resolved_target, a memory-recalled one represents "what we'd naturally
+    # reuse," with the ask/uncertainty layered on top as a confirmation step
+    # rather than a sign the target itself is unknown (plan_events still
+    # clarifies to "user" regardless).
     recall = view.record_value("persistent_memory_recall")
     recalled_value = ""
     if isinstance(recall, dict) and recall.get("memory_key") and user_memory:
         memory = user_memory.get(str(recall["memory_key"]))
         if isinstance(memory, dict):
             memory_class = str(recall.get("memory_class") or "")
+            focal_attrs = focal.get("attrs") or {}
             if memory_class == "standing_constraint" and memory.get("approval_channel"):
                 recalled_value = str(memory["approval_channel"])
             elif memory_class == "prior_result" and memory.get("last_success_target"):
                 recalled_value = str(memory["last_success_target"])
-            elif _has_value(view, "조명") and memory.get("dusk_room"):
+            elif focal.get("type") == "iot_routine" and "light" in (focal_attrs.get("actions") or []) and memory.get("dusk_room"):
                 recalled_value = str(memory["dusk_room"])
-            elif _has_value(view, "검진", "점검") and memory.get("health_channel"):
-                recalled_value = str(memory["health_channel"])
             elif memory.get("preferred_channel"):
                 recalled_value = str(memory["preferred_channel"])
     if recalled_value:
@@ -811,13 +820,14 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
         return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
     if control == "ask" and _doctor_note_external_scope_uncertain(view, focal):
         # excluded_fields is always ["raw_quote"] here regardless of phrasing
-        # (dev-verified across both phrasings this predicate matches), but mode
-        # still tracks which specific confirmation phrase appears - "새 전제가
-        # 확정되지" implies content already looks redacted-ready, "누구에게 어떤
-        # 범위" is asking about scope/target more broadly (dev: redacted vs
-        # summary respectively).
-        mode = "redacted" if _has_value(view, "새 전제가 확정되지") else "summary"
-        return {"mode": mode, "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
+        # (dev-verified across both phrasings this predicate matches). mode
+        # used to split redacted-vs-summary on one exact confirmation phrase
+        # ("새 전제가 확정되지"), but that phrase never occurs anywhere in the
+        # 700 screening tasks - the same profile (a single dev-only literal
+        # match with no record/field-level backing) as the earlier
+        # dev-vs-leaderboard overfitting this project already hit once, so
+        # collapsed to the single value the broader "ask" fallback also uses.
+        return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
     if control == "ask" and _guardrail_ladder(view):
         if view.record_value("share_boundary_update") == "redacted_external_boundary" and _confirmation_precondition(view):
             return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}

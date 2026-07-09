@@ -163,3 +163,19 @@ dev 전체: 0.9389 → **0.9444** (control 축 100%, focal 100%, target 97.5%, c
 **결론**: `_unaddressed_prior_failure_recall`을 위험하게 만들었던 두 가지 특징 — (a) `control` 필드 자체를 바꿔서 그 태스크의 target/content_scope/policy/plan 점수까지 연쇄로 0에 가깝게 만드는 큰 blast radius, (b) "증거"로 삼은 두 사례가 사실 이름만 바뀐 동일 템플릿이라 독립적인 근거가 아니었던 점 — 이 두 가지를 남은 후보들엔 적용할 수 없었다. 남은 규칙들은 전부 (a) `content_scope.mode`나 `target` 같은 서브필드 하나에만 영향을 주고, (b) 검증 사례가 서로 다른 독립적 시나리오였다. 따라서 추가 롤백 없이 유지하기로 결정.
 
 **부수적으로 발견한 이슈(규정과 무관, 순수 코드 정리)**: `_enterprise_policy_review`, `_same_context_followup` 두 함수가 정의만 되어 있고 어디서도 호출되지 않는 죽은 코드였음(아마 이전 리팩터링 과정에서 호출부가 다른 함수로 대체되며 남은 잔재로 추정). 동작에는 전혀 영향 없지만 정리 차원에서 제거, `audit_screening.py`의 predicate 목록에서도 대응 항목 제거. 74개 테스트 전체 통과, drift guard 통과, dev 0.9389 그대로 유지(동작 변화 없음이 예상대로 확인됨), `submission.csv` 재생성 완료.
+
+## "말대로 적용할 수 있다면 적용해" — 트리거 단어를 벗겨내는 재검증, 실제로 실행
+
+바로 앞에서 "유지"로 결론냈던 세 항목("조명"/"검진,점검" 키워드 라우팅, `doctor_note` mode 분기)에 대해, 사용자가 이전에 내가 제안했던 "한국어 트리거 단어를 걷어내고 record 타입/필드 의미만으로 말이 되는지" 테스트를 실제로 실행하라고 요청. 세 항목 전부 직접 트레이스로 재검증했고, 이번엔 **표면적 population 크기가 아니라 "screening에 이 정확한 문구/신호가 재현되는가"를 기준**으로 판단했다. 이 기준을 잡게 된 결정적 계기: `git log -S`로 과거 히스토리를 보다가 이 프로젝트가 이미 한 번 정확히 이 문제로 크게 데인 적이 있다는 걸 발견함 — 커밋 `6af99a1`("Remove dev-set overfitting from focal/target/control logic")의 메시지: "Local dev score (0.94) diverged sharply from the leaderboard score (0.39) because ... matched dozens of exact Korean phrases ... that only occur in the 120 public dev examples, none of which fire on the 700 screening tasks." 즉 "dev 1건짜리 정확 문구 매칭"은 추상적 우려가 아니라 이 프로젝트에서 실제로 0.94→0.39 붕괴를 일으킨 적이 있는 검증된 위험 패턴.
+
+이 기준으로 셋을 다시 판정:
+
+1. **`doctor_note` mode 분기(`새 전제가 확정되지` 문구)** — screening 700개 전체에서 이 정확한 문구가 **0회** 등장함을 직접 확인(`grep`으로 phrase가 어느 screening task에도 없음을 검증). dev 2건 각각 redacted/summary로 정확히 갈리긴 했지만, 두 dev 태스크의 record/object 구조를 전수 비교한 결과 텍스트 문구 외에는 어떤 구조적 차이도 없었음(같은 `external_share_policy`, 같은 `session_share_policy`, 같은 object 스키마) — 즉 이 분기는 순수하게 "이 정확한 한국어 문구가 이 dev 태스크에 있었다"는 사실에만 의존. 이는 `6af99a1`이 제거했던 패턴과 정확히 같은 프로파일. **롤백**: mode를 항상 `"summary"`(분기 도입 전 기본값과 동일 계열, 같은 함수 내 다른 fallback들도 쓰는 값)로 고정.
+2. **"검진/점검" → `health_channel` 키워드 라우팅** — 대상 dev 태스크(`7efad6a5e982`)를 구조적으로 재조사한 결과, focal object가 `message` 타입에 자유 텍스트 `body` 필드만 가지고 있어 "조명" 케이스와 달리 domain을 나타내는 구조적 필드가 전혀 없음 — 순수 텍스트 키워드 매칭이었음. 게다가 실제로 해당 dev 태스크의 memory profile을 직접 열어보니 `health_channel`과 `preferred_channel` 값이 **우연히 똑같이 "caregiver"** — 즉 이 특수 분기를 완전히 제거해도 이미 있던 범용 fallback(`preferred_channel`)만으로 정확히 같은 결과가 나옴, dev 점수 손실 0. **제거**(위험 감소 + 점수 손실 없음, 순수 이득).
+3. **"조명" → `dusk_room` 키워드 라우팅** — 대상 dev 태스크(`cf4f02fecf71`)를 구조적으로 재조사한 결과, `choose_focal`이 실제로 골라내는 focal object가 `{"type": "iot_routine", "attrs": {"actions": ["light"], ...}}` — object 자체가 이미 구조적으로 "조명 동작"임을 선언하고 있음. 프롬프트의 "조명"이라는 단어를 걷어내고 `focal.get("type")=="iot_routine" and "light" in focal.attrs.actions`로 바꿔도 정확히 같은 dev 결과가 나옴 — 순수 텍스트 매칭을 구조적(스키마 기반) 판별로 교체. "조명"이라는 단어 자체도 screening 7건에서 재현되어(text 재현성도 확인) 이중으로 방어됨. **유지하되 구조적으로 재작성**: 이제 프롬프트 문구가 아니라 focal object의 `type`/`actions` 필드를 직접 읽음 — hidden 태스크가 다른 표현("불을 켜")을 쓰더라도 object 스키마가 같다면 여전히 맞음.
+
+`diagnostics/trace_target.py`도 동일하게 갱신(구식 `T04d_recall_health_channel` 브랜치 제거, `T04c_recall_dusk_room`을 구조적 판별로 교체) — drift guard 테스트로 실제 `infer_target`과 계속 일치함을 확인.
+
+**검증**: 74개 테스트 전체 통과, drift guard 통과, dev 0.9389 → **0.9384**(doctor_note 롤백으로 인한 예상된 소폭 하락, 나머지 두 변경은 dev 점수에 영향 없음 — 예측과 정확히 일치). `submission.csv` 재생성, `audit_screening.py` 재실행으로 새로운 이상 없음 확인.
+
+**교훈**: population 크기(n=1, n=2)만으로는 위험을 다 못 잡는다 — 진짜 판별 기준은 "이 신호가 dev 밖(screening)에서도 재현되는가"와 "구조적 필드에 근거하는가"이고, 이 프로젝트는 이미 한 번 그 교훈을 비싸게 치른 적이 있다(`6af99a1`). 앞으로 새 규칙을 추가할 때는 dev 검증뿐 아니라 **screening에서의 문구/신호 재현 여부를 항상 같이 확인**하는 것을 표준 절차로 삼는다.

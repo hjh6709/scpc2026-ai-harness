@@ -13,7 +13,6 @@ from harness import (
     _condition_uncertain,
     _doctor_note_external_scope_uncertain,
     _explicit_user_confirmation_requested,
-    _has_value,
     _is_local_update,
     _looks_like_target_name,
     _precondition_invalidated,
@@ -48,14 +47,13 @@ def infer_target_traced(
         memory = user_memory.get(str(recall["memory_key"]))
         if isinstance(memory, dict):
             memory_class = str(recall.get("memory_class") or "")
+            focal_attrs = focal.get("attrs") or {}
             if memory_class == "standing_constraint" and memory.get("approval_channel"):
                 return str(memory["approval_channel"]), "T04a_recall_approval_channel"
             if memory_class == "prior_result" and memory.get("last_success_target"):
                 return str(memory["last_success_target"]), "T04b_recall_last_success_target"
-            if _has_value(view, "조명") and memory.get("dusk_room"):
+            if focal.get("type") == "iot_routine" and "light" in (focal_attrs.get("actions") or []) and memory.get("dusk_room"):
                 return str(memory["dusk_room"]), "T04c_recall_dusk_room"
-            if _has_value(view, "검진", "점검") and memory.get("health_channel"):
-                return str(memory["health_channel"]), "T04d_recall_health_channel"
             if memory.get("preferred_channel"):
                 return str(memory["preferred_channel"]), "T04e_recall_preferred_channel"
 
