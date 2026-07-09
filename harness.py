@@ -457,6 +457,21 @@ def _mixed_local_external_confirmation(view: TaskView) -> bool:
 
 
 def _external_binding_blocked(view: TaskView) -> bool:
+    # The trailing exclusion used to be a literal phrase ("표면 문장") that
+    # turned out to be dev-only preamble boilerplate: 40 dev occurrences, 0
+    # in the 700 screening tasks (screening uses different opener sentences
+    # for the same "check session state" framing) - it was silently
+    # suppressing this exclusion on every screening task. Replaced with the
+    # structural case it was actually covering: multiple focal candidates
+    # still open (ambiguous_focal) *and* the block is from authority
+    # resolution still in progress rather than a user binding decision
+    # pending (dispatch_authority_check=="authority_incomplete", not
+    # "user_binding_pending" - the same distinction _target_ambiguity_signal
+    # already relies on elsewhere) - asking to disambiguate the focal object
+    # makes more sense than holding on a binding block that isn't the real
+    # blocker yet. Dev-verified: 0 new mismatches across the full dev set,
+    # including the one case (user_binding_pending + ambiguous_focal) that
+    # genuinely still wants "hold".
     return (
         view.record_value("route_candidate_snapshot") == "external_candidates_present"
         and view.record_value("share_boundary_update") == "dispatch_blocked_until_binding"
@@ -464,7 +479,10 @@ def _external_binding_blocked(view: TaskView) -> bool:
         and not _has_value(view, "세부값을 제외", "redacted_summary_only", "summary_only", "minimal_disclosure")
         and not _condition_uncertain(view)
         and not _mixed_local_external_confirmation(view)
-        and not _has_value(view, "표면 문장")
+        and not (
+            view.record_value("ambiguous_focal") == "multiple_focal_candidates_present"
+            and view.record_value("dispatch_authority_check") == "authority_incomplete"
+        )
     )
 
 

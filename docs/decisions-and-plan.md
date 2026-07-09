@@ -203,3 +203,21 @@ dev 전체: 0.9389 → **0.9444** (control 축 100%, focal 100%, target 97.5%, c
 **검증**: 74개 테스트 전체 통과, drift guard 통과, dev 0.9384 → **0.9384**(예측대로 dev 영향 0 — 두 변경 모두 dev population을 그대로 보존하면서 screening/hidden 재현성만 개선). `submission.csv` 재생성, `_same_place_check_summary`/`_summary_only_composite_plan` screening 발동 횟수 0→3/0→3으로 확인.
 
 **결론 (0.96 목표에 대한 정직한 평가)**: local dev 0.9384는 이미 "안전하게 고칠 수 있는 모든 것"을 고친 상태이고, 남은 0.0216만큼의 격차는 (a) 데이터 자체가 없어 코드로 못 푸는 3건, (b) 규정 위반 리스크 때문에 의도적으로 포기한 2건으로 전부 설명됨 — dev 점수만 억지로 0.96에 맞추려면 이번 세션에서 두 번이나 되돌린 것과 같은 위험한 패턴을 다시 넣어야 한다. 대신 이번 라운드는 dev 점수엔 안 보이지만 hidden 일반화에는 실제로 영향을 미치는 두 건(하나는 순수 위험 감소, 하나는 확인된 실질 버그)을 찾아 고쳤다 — **"dev 축 완벽화"가 아니라 "screening/hidden에서 실제로 작동하는 코드로 만들기"가 이제부터의 올바른 고도화 방향**이라는 게 이번 라운드의 핵심 결론.
+
+## "다른 부분들에서는 부족한 부분이 없나" — harness.py 전체 문구 인벤토리 감사
+
+앞선 두 건(`_same_place_check_summary`, `_summary_only_composite_plan`)을 찾은 방법(0-hit predicate 조사)은 **이름 붙은 predicate 함수**만 잡아낸다는 한계가 있음 — `decide_control`/`build_content_scope`/`build_policy` 안에 직접 인라인된 `_has_value(...)` 호출은 놓친다. 그래서 이번엔 `harness.py` 전체에서 조건문에 쓰이는 **모든 리터럴 한국어 문구 98개를 정규식으로 추출**해서 각각의 dev/screening 등장 횟수를 전수 대조했다.
+
+**발견 1 — `_external_binding_blocked`의 `"표면 문장"` 제외 조건 (dev 40건 / screening 0건)**: 두 번째로 큰 dev-only 문구였음("최근 동의"의 50건 다음). 원인은 dev와 screening이 "표면 텍스트만 보지 말고 세션 상태를 확인하라"는 **같은 지시를 완전히 다른 문장으로 표현**하기 때문 — dev 1위 오프닝 문장은 "표면 문장만 보지 말고 세션 상태까지 확인해서 처리해줘."(40건, screening 0건)인 반면, screening 1·2위 오프닝은 "이번 턴에서는 보이는 요청과 최신 상태 기록을 함께 적용한다."(182건)와 "아래 요청은 최근 메모리와 정책 상태를 같이 읽어야 한다."(172건)인데 이 둘은 dev에 0건. 즉 이 오프닝 문장 자체는 순수 서사적 보일러플레이트(내용 없는 도입부)이고, dev와 screening이 그냥 다른 버전을 썼을 뿐.
+
+이 조건을 통째로 지우면 dev 2건이 새로 깨짐(`681d2e291ea5`, `0ad44d955594` - 둘 다 `ask`를 원하는데 `hold`가 나옴) — 즉 이 조건이 막아주던 진짜 케이스가 있다는 뜻. 두 태스크를 직접 열어 구조적 차이를 찾음: 둘 다 `ambiguous_focal == "multiple_focal_candidates_present"`. 하지만 이걸 단순 대체하면 또 다른 dev 태스크(`0ab2e0715082`, 같은 `ambiguous_focal` 상태인데 `hold`를 원함)가 깨짐 — 차이를 더 파보니 `dispatch_authority_check`가 셋 중 이것만 `"user_binding_pending"`이고 나머지 둘은 `"authority_incomplete"`. 이 구분은 이미 `_target_ambiguity_signal`에 "dev-verified 0/120"으로 문서화된 기존 원칙("user_binding_pending=진짜 사용자 바인딩 대기, authority_incomplete=시스템 권한 해석 중일 뿐")과 정확히 일치 — 새로 지어낸 게 아니라 이미 검증된 구조적 원칙의 재사용. `ambiguous_focal == "multiple_focal_candidates_present" and dispatch_authority_check == "authority_incomplete"`로 교체 후 dev 전체 재검증: 기존에 이미 받아들이기로 한 `0937ccedef94` 1건 외 새 mismatch 0건(control뿐 아니라 content_scope.mode/risk_flags까지 포함해도 0건). screening에서 `_external_binding_blocked` 발동 56건→52건으로 변화(4건이 새로 "hold" 대신 다른 control로 바뀜, 구조적으로 더 정확해짐).
+
+**발견 2 — 같은 함수 내 `"privacy_review"` → `mode="none"` 분기의 `"표면 문장만"` (dev 1건)**: 이것도 screening 0건이지만, 이번엔 **loosening을 보류했다**. 이유: dev가 단 1건뿐이라 대조군이 없고, 문구를 지웠을 때 screening에서 새로 걸리는 9건을 직접 열어보니 dev 예시(`route_candidate_snapshot="external_candidates_present"`, `dispatch_authority_check="authority_incomplete"`)와 완전히 다른 구조(`local_candidate_only`/`mixed_local_external_candidates`, `local_update_boundary` 등 훨씬 "로컬" 쪽에 가까운 신호)를 가지고 있었음 — 즉 dev의 단일 사례에서 관찰된 "완전히 보류(mode=none)"라는 결론이 이 9건에도 적용되는지 검증할 근거가 없음. `_summary_only_composite_plan` 때는 실제로 내용을 열어봐서 명백한 모순(요약만 요청했는데 raw로 답함)을 확인하고 고쳤지만, 이번엔 그런 확증이 없어 **건드리지 않기로 결정** — "dev-only라서 무조건 완화"가 아니라 매번 개별적으로 확증 가능한지 확인하는 게 원칙.
+
+**발견 3 — 같은 함수의 `audit_vendor` 분기에 있는 `"누구에게 어떤 범위"` 부정 조건 (dev 3건 / screening 0건)**: 실제로 이 negation이 관련 있는 dev 3개 태스크에서 전부 이미 `False`였음(즉 원래도 아무 영향이 없었음) — dev에서도 screening에서도 한 번도 실질적으로 작동한 적 없는 조건. 해롭진 않으니 그대로 둠.
+
+**발견 4 — OR-list 구조인 `_precondition_invalidated`/`_condition_uncertain`/`_explicit_user_confirmation_requested`**: 각각 몇 개 구성 문구가 screening 0건이지만(예: "허용 근거", "누구에게 어떤 범위" 등), **같은 리스트의 다른 문구들이 screening에서 15~40회씩 살아있어서** 전체 predicate는 건강함(예: "믿을 수 없으므로" 0/15, "허용의 근거" 0/21, "확정 정보가 없" 0/20 등이 각각 dev/screening에서 정확히 반대로 강함 — dev와 screening이 서로 다른 동의어를 쓰지만 OR로 묶여 있어서 어느 한쪽만 봐도 서로를 보완함). AND 조건에서 문구 하나가 dev-only면 전체가 죽지만, OR 리스트에서는 무해한 중복일 뿐 — 이 구조적 차이가 왜 이 셋은 안전하고 앞서 고친 것들은 위험했는지의 핵심 기준.
+
+**검증**: 74개 테스트 통과, drift guard 통과, dev 0.9384 유지(변경 없음, 예측대로), `submission.csv` 재생성, `audit_screening.py` 재확인 이상 없음.
+
+**정리된 원칙**: dev-only 문구를 발견했다고 무조건 고치는 게 아니라, (1) AND 체인의 유일한 게이트인지 OR 리스트의 중복 멤버인지 구분하고, (2) 대체/제거가 dev 전체에서 새 mismatch 0건임을 반드시 확인하고, (3) 새로 열리는 screening 케이스를 최소 1~2건 직접 열어서 답이 실제로 말이 되는지 확인할 수 있을 때만 적용한다 — 세 조건 중 하나라도 확인 불가능하면(이번 발견 2처럼) 손대지 않고 현상 유지한다.
