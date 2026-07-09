@@ -849,10 +849,22 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
     if (_temporary_privacy_override(view) or _same_place_check_summary(view)) and control == "amend":
         return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": False}
     if _has_status_update_boundary(view) and control == "proceed":
+        # dev-verified 40/40: strict session_share_policy always excludes the
+        # three fields; under "normal" policy they're only excluded if the
+        # focal object actually contains one of them - otherwise there's
+        # nothing sensitive to guard against and dev leaves excluded_fields
+        # empty (status_only means nothing leaves the device either way, so
+        # this only affects what the answer *documents*, not what's shared).
+        strict_policy = str(view.record_value("session_share_policy") or "").lower() == "strict"
+        status_only_excluded = (
+            ["raw_quote", "location", "numeric_value"]
+            if strict_policy or (contains & {"raw_quote", "location", "numeric_value"})
+            else []
+        )
         return {
             "mode": "status_only",
             "allowed_fields": ["status"],
-            "excluded_fields": ["raw_quote", "location", "numeric_value"],
+            "excluded_fields": status_only_excluded,
             "requires_user_confirmation": False,
         }
     if _guardrail_verified_external_route(view) and control == "proceed":
