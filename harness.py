@@ -762,7 +762,8 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
         mode = "redacted" if _has_value(view, "민감", "점검 내용", "check summary", "원본", "사진", "duration_ambiguous", "전제 조건") else "summary"
         return {"mode": mode, "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
     if control == "ask":
-        return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": excluded or ["raw_quote"], "requires_user_confirmation": True}
+        mode = "redacted" if _has_value(view, "민감", "점검 내용", "check summary", "원본", "사진", "duration_ambiguous", "전제 조건") else "summary"
+        return {"mode": mode, "allowed_fields": ["summary"], "excluded_fields": excluded or ["raw_quote"], "requires_user_confirmation": True}
     if _prior_success_memory_reuse(view) and control == "amend":
         return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": False}
     if (_temporary_privacy_override(view) or _same_place_check_summary(view)) and control == "amend":
