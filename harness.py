@@ -168,7 +168,14 @@ FOCAL_ORDINAL_WORDS = {
     "첫": 0, "두": 1, "세": 2, "네": 3, "다섯": 4,
     "여섯": 5, "일곱": 6, "여덟": 7, "아홉": 8, "열": 9,
 }
-FOCAL_POSITIVE_TERMS = ["확정", "최종", "선택", "지정", "채택", "결정", "승인", "처리 대상", "통과", "고정", "selected", "final", "confirm"]
+# "째" ordinal counters use irregular stems distinct from the "번째" forms above
+# (둘째 not 두째, 셋째 not 세째, 넷째 not 네째) - a separate word list, not a suffix
+# swap on FOCAL_ORDINAL_WORDS.
+FOCAL_JJAE_ORDINAL_WORDS = {
+    "첫": 0, "둘": 1, "셋": 2, "넷": 3, "다섯": 4,
+    "여섯": 5, "일곱": 6, "여덟": 7, "아홉": 8, "열": 9,
+}
+FOCAL_POSITIVE_TERMS = ["확정", "최종", "선택", "지정", "채택", "결정", "승인", "처리 대상", "통과", "고정", "유효한", "selected", "final", "confirm"]
 FOCAL_NEGATIVE_TERMS = ["제외", "보류", "무시", "폐기", "취소", "배제", "decoy", "hold", "exclude"]
 
 
@@ -183,7 +190,10 @@ def _ordinal_indices(sentence: str) -> list[int]:
         if value >= 0:
             indices.add(value)
     for word, index in FOCAL_ORDINAL_WORDS.items():
-        if f"{word}번째" in sentence or f"{word} 번째" in sentence or f"{word}째" in sentence:
+        if f"{word}번째" in sentence or f"{word} 번째" in sentence:
+            indices.add(index)
+    for word, index in FOCAL_JJAE_ORDINAL_WORDS.items():
+        if f"{word}째" in sentence:
             indices.add(index)
     return sorted(indices)
 
