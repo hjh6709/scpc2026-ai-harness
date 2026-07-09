@@ -456,14 +456,19 @@ class HarnessInterfaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "submission.csv"
             write_submission_csv(payload, out)
-            with out.open(encoding="utf-8-sig", newline="") as f:
+            with out.open(encoding="utf-8", newline="") as f:
                 rows = list(csv.DictReader(f))
             self.assertEqual(list(rows[0]), ["submission"])
             parsed = json.loads(rows[0]["submission"])
             self.assertEqual(parsed["schema"], "scpc.final.answer.v1")
-            # Match the organizer-provided sample_submission.csv exactly: UTF-8 BOM + CRLF line endings.
+            # Match the organizer's own write_submission_csv in
+            # SCPC2026_Final_baseline.ipynb byte-for-byte: plain UTF-8 (no BOM)
+            # + CRLF line endings. sample_submission.csv itself has a BOM, but
+            # the reference *code* does not add one, and a stray BOM breaks a
+            # plain `open(path, encoding="utf-8")` column-name read - matching
+            # the organizer's own reference implementation removes that risk.
             raw = out.read_bytes()
-            self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
+            self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
             self.assertIn(b"\r\n", raw)
 
     def test_focal_resolution_uses_marker_trace(self):

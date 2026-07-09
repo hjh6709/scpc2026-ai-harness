@@ -1342,12 +1342,21 @@ def validate_answer_consistency(task_id: str, answer: dict[str, Any]) -> None:
 
 
 def write_submission_csv(payload: dict[str, Any], output_path: str | Path) -> None:
+    # Matches the organizer's own SCPC2026_Final_baseline.ipynb write_submission_csv
+    # exactly: plain "utf-8" (no BOM) via csv.writer. sample_submission.csv itself
+    # has a BOM, but the reference *code* the organizers provided does not add
+    # one - and a plain `open(path, encoding="utf-8")` read (the natural way to
+    # mirror that writer) leaves a stray "﻿" prepended to the header, which
+    # would break a column-name lookup on the "submission" column. Since we
+    # can't observe how the real grading pipeline parses this file, matching the
+    # organizer's own reference implementation byte-for-byte removes the risk
+    # entirely rather than guessing.
     validate_payload(payload)
     path = Path(output_path)
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["submission"], lineterminator="\r\n")
-        writer.writeheader()
-        writer.writerow({"submission": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))})
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["submission"])
+        writer.writerow([json.dumps(payload, ensure_ascii=False, separators=(",", ":"))])
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
