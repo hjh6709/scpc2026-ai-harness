@@ -47,11 +47,11 @@ from harness import (
 GATE_FUNCTIONS_VIEW = [
     "_precondition_invalidated", "_child_sleep_lighting_memory_block", "_confirmation_precondition",
     "_condition_uncertain", "_stored_channel_ambiguous", "_persistent_memory_sensitive_share",
-    "_prior_success_memory_reuse", "_enterprise_policy_review", "_temporary_privacy_override",
+    "_prior_success_memory_reuse", "_temporary_privacy_override",
     "_same_place_check_summary", "_guardrail_ladder", "_guardrail_blocked_binding",
     "_mixed_local_external_confirmation", "_external_binding_blocked", "_guardrail_verified_external_route",
     "_guardrail_local_boundary_review", "_surface_resolved_channel_conflict", "_summary_only_composite_plan",
-    "_plain_composite_plan", "_revoked_or_security_precondition", "_same_context_followup",
+    "_plain_composite_plan", "_revoked_or_security_precondition",
     "_direct_reuse_followup", "_is_local_update", "_has_status_update_boundary",
     "_explicit_user_confirmation_requested", "_target_ambiguity_signal",
 ]
@@ -94,10 +94,10 @@ def rule_coverage(tasks: list[dict[str, Any]]) -> dict[str, int]:
         # miss), and that wrong policy would then get written into session
         # state, skewing every later task in the same session that reads it.
         evidence = slm.summarize_task(t)
-        control = H.decide_control(view, focal, evidence, session, user_memory)
+        control = H.decide_control(view, focal, evidence, session)
         target = H.infer_target(view, focal, control, session, user_memory)
         scope = H.build_content_scope(view, focal, control, evidence)
-        policy = H.build_policy(view, focal, control, scope, evidence, user_memory)
+        policy = H.build_policy(view, focal, control, scope, evidence)
         H.update_session_state(view, session, focal.get("id", ""), target, control, scope, policy)
         H.update_session_memory(view, session, user_memory)
     return counts

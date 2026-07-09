@@ -83,8 +83,8 @@ class TracedFunctionsMatchRealFunctionsTests(unittest.TestCase):
             if real_focal != traced_focal:
                 focal_mismatches.append(task["id"])
 
-            real_control = decide_control(view, real_focal, evidence, session, user_memory)
-            traced_control, _control_branch = decide_control_traced(view, real_focal, evidence, session, user_memory)
+            real_control = decide_control(view, real_focal, evidence, session)
+            traced_control, _control_branch = decide_control_traced(view, real_focal, evidence, session)
             if real_control != traced_control:
                 control_mismatches.append(task["id"])
 
@@ -94,7 +94,7 @@ class TracedFunctionsMatchRealFunctionsTests(unittest.TestCase):
                 target_mismatches.append(task["id"])
 
             scope = build_content_scope(view, real_focal, real_control, evidence)
-            policy = build_policy(view, real_focal, real_control, scope, evidence, user_memory)
+            policy = build_policy(view, real_focal, real_control, scope, evidence)
             update_session_state(view, session, real_focal.get("id", ""), real_target, real_control, scope, policy)
             update_session_memory(view, session, user_memory)
 

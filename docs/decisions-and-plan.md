@@ -127,3 +127,39 @@ dev 전체: 0.9389 → **0.9444** (control 축 100%, focal 100%, target 97.5%, c
 - **screening 정답 raw data가 없다.** 모든 검증은 간접적(구조 상관관계, dev와의 패턴 일치, 클러스터 내부 일관성)일 수밖에 없어서, 일부 수정(특히 `799c158`의 ask scope mode 판단)은 "다음 제출 전까지는 100% 확신 불가"인 상태로 남아있다.
 - **제출 횟수 제한**으로 실험적 변경을 남발하면 안 되고, 확신도 높은 변경을 모아서 배치로 제출하는 편이 낫다.
 - **대회 종료 시점**을 확인해서 남은 라운드 수를 가늠해야 한다 (현재 세션에서는 파악 못함).
+
+## Public/Hidden 과적합 리스크 자체 감사 — `_unaddressed_prior_failure_recall` 롤백
+
+사용자가 대회 공식 규정 전문(Public vs Hidden 점수 격차, "공개 screening Task에만 맞는 예외 규칙을 과도하게 추가"가 규정 위반 판단 사유가 될 수 있다는 경고)을 그대로 인용하며 최근 추가한 규칙들을 다시 감사하라고 요청. 직전 라운드에서 추가한 13개 dev-검증 규칙 전체를 모집단 크기·근거의 구조적 독립성 기준으로 재분류한 결과, 가장 위험한 건 `0937ccedef94`/`ec6febf11406` 케이스에서 도출한 `_unaddressed_prior_failure_recall`(persistent_memory_recall + last_failure_reason + "바로" + 확인 문구 부재 → hold)이었음:
+
+- 공개 데이터 820개(dev+screening) 전체에서 **정확히 2건**에서만 발동.
+- 그 2건은 이름/물건만 바뀐 **동일 서사 템플릿**(피민/케이크 ↔ 하나/견과류)으로, 독립적인 두 사례가 아니라 사실상 같은 사례 하나를 두 번 관찰한 것에 가까움.
+- Hidden 데이터에 이 정확한 조합이 없으면 기대 이득은 0, 있는데 조금이라도 다르게 변형돼 있으면(예: "바로" 대신 다른 표현, 다른 memory_class) 오히려 오답을 유발할 위험이 있음.
+- 기대 이득(전체 태스크의 약 0.24%) 대비 "공개 task 구조에만 맞춘 예외 규칙"으로 해석될 규정 위반 리스크가 불균형하게 크다고 판단해 롤백 결정.
+
+**롤백 내용**: `harness.py`에서 `_unaddressed_prior_failure_recall` 함수 정의와 `decide_control`/`build_policy` 내부 호출부 제거, 두 함수의 `user_memory` 파라미터도 함께 제거(더 이상 쓰는 곳이 없으므로). `diagnostics/trace_control.py`(대응 브랜치 `L02b_unaddressed_prior_failure_recall` 제거), `diagnostics/report.py`, `audit_screening.py`, `tests/test_diagnostics_drift.py`의 호출부도 함께 갱신. `infer_target`의 `user_memory` 파라미터(cross-session memory 기반 target 필드 라우팅)는 이번 롤백 대상이 아님 — 별도로 리스크 분류됨(아래 참고).
+
+**검증**: 74개 유닛 테스트 전체 통과, drift guard 테스트 통과, dev 점수 0.9444 → **0.9389**로 정확히 롤백 대상 태스크(`0937ccedef94`) 1건 분만큼만 하락(다른 회귀 없음 확인). `submission.csv` 재생성 후 `ec6febf11406`의 control이 `hold`→`ask`로 되돌아간 것 확인, UTF-8 BOM+CRLF 포맷 유지 확인.
+
+**아직 사용자 결정 대기 중인 나머지 두 건** (같은 감사에서 MEDIUM-HIGH 리스크로 분류했으나 이번엔 롤백하지 않음):
+1. **`doctor_note` mode 분기**(redacted vs summary) — dev 검증 표본 n=2뿐. 다만 두 문구가 이미 존재하던 `_doctor_note_external_scope_uncertain`이 인식하는 문구 자체에서 자연스럽게 갈리는 구조라, 순수 lookup보다는 방어 가능할 수 있음.
+2. **cross-session memory 기반 target 필드 라우팅**(`memory_class`별 approval_channel/last_success_target/dusk_room/health_channel/preferred_channel) — 서브 분기별 검증 표본 n=1~4. `memory_class`/키워드 이름 자체가 의미적으로 필드를 가리키는 구조라 순수 표면 패턴 매칭은 아니라고 볼 여지가 있으나, 표본이 작다는 점은 동일한 우려.
+
+두 건 모두 다음 라운드에서 사용자와 함께 유지/롤백 여부를 결정하기로 하고 보류.
+
+## 보류했던 두 건 + 유사 항목 전수 재조사 — "규정 위반이나 hidden 점수를 위해 다시 살펴봐" 라운드
+
+지난 롤백 이후 사용자가 다시 한번 규정 위반/hidden 점수 관점에서 전체를 재검토하라고 요청. `_unaddressed_prior_failure_recall`을 롤백한 기준(모집단 크기, 근거의 구조적 독립성)을 남은 모든 예외 규칙에 동일하게 적용해 재분류했다.
+
+**분석 방법**: 모든 named predicate(28개)가 dev에서 최소 몇 번이나 발동하는지 전수 카운트(`0건`인 것 — 즉 dev로는 전혀 검증할 수 없고 screening 구조만 보고 만든 규칙이 있는지 — 를 최우선으로 찾음). 결과: **0건은 하나도 없음.** 가장 적게 발동하는 것도 dev 1건은 있음(`_prior_success_memory_reuse`, `_surface_resolved_channel_conflict`, `_direct_reuse_followup` 등). 즉 "screening 구조에만 맞춰 만들고 dev로는 검증조차 안 되는" 유형의 규칙은 이미 없다는 뜻.
+
+**보류 중이던 두 건 + 유사 항목 하나를 직접 트레이스로 재검증**:
+
+1. **cross-session memory 필드 라우팅의 `조명`/`검진,점검` 키워드 분기** — 실제로 이 분기까지 도달하는(참조하는 memory_key가 실제로 이 세션에서 먼저 기록된) dev 사례가 각각 정확히 1건씩(`cf4f02fecf71`→dusk_room="living_room", `7efad6a5e982`→health_channel="caregiver")이고, 둘 다 정확히 일치함을 직접 트레이스로 확인. 서로 다른 두 도메인(조명/건강)에서 독립적으로 검증된 것이지, `_unaddressed_prior_failure_recall`처럼 같은 서사를 두 번 관찰한 게 아님. 근거 스키마 자체도 확인: `persistent_memory_write`의 값 dict는 dev+screening 전체 9건 중 8건이 **정확히 동일한 23개 키**(`approval_channel`/`dusk_room`/`health_channel`/`preferred_channel` 등)를 갖는 고정 스키마 — 즉 이 필드명들은 태스크별로 임의로 지어낸 게 아니라 데이터셋 전역에서 고정된 프로필 스키마의 일부. "조명"/"검진"/"점검"도 각각 그 주제를 가리키는 일반 한국어 단어(캐릭터 이름이나 특정 서사 문구가 아님). 이 규칙이 hidden에서 안 맞아도 영향 범위는 target 필드 하나(같은 세션 내 정확히 이 조합이 재현될 때만) — control을 오염시켜 여러 필드를 한꺼번에 깎아먹는 구조가 아님. **결론: 유지.**
+2. **`doctor_note` 분기의 redacted vs summary mode 분기**(`새 전제가 확정되지` 문구 여부) — 이미 존재하는 `_doctor_note_external_scope_uncertain`이 인식하는 두 문구 중 어느 쪽이냐로만 나뉘고, dev 2건이 각각 다른 문구로 다른 mode를 100% 정확히 재현. 영향 범위도 `content_scope.mode` 서브필드 하나뿐. **결론: 유지.**
+3. **비교 검증용으로 추가 조사한 `ambiguous_focal`+`resolved_target=="privacy_review"/"audit_vendor"` scope 분기** — `audit_vendor` 쪽은 dev 3건(redacted 2건 + summary로 정확히 갈리는 1건)으로 실제로는 표본이 더 큼. `privacy_review`→`none` 쪽은 dev 1건뿐이지만 마찬가지로 `content_scope` 서브필드 하나에만 영향. **결론: 유지.**
+4. **비교 기준점으로 `build_content_scope`의 redacted/summary 판별에 쓰이는 대규모 트리거 단어 리스트**(`민감`/`점검 내용`/`원본`/`사진` 등, line 854/857)를 dev 전체 `ask` 태스크(26건) 대상으로 재검증 — 25/26 정확(유일한 불일치는 기존에 이미 "노이즈"로 결론 낸 `31fb29f3b379`). 대규모 표본에서도 잘 작동함을 재확인, 별도 조치 불필요.
+
+**결론**: `_unaddressed_prior_failure_recall`을 위험하게 만들었던 두 가지 특징 — (a) `control` 필드 자체를 바꿔서 그 태스크의 target/content_scope/policy/plan 점수까지 연쇄로 0에 가깝게 만드는 큰 blast radius, (b) "증거"로 삼은 두 사례가 사실 이름만 바뀐 동일 템플릿이라 독립적인 근거가 아니었던 점 — 이 두 가지를 남은 후보들엔 적용할 수 없었다. 남은 규칙들은 전부 (a) `content_scope.mode`나 `target` 같은 서브필드 하나에만 영향을 주고, (b) 검증 사례가 서로 다른 독립적 시나리오였다. 따라서 추가 롤백 없이 유지하기로 결정.
+
+**부수적으로 발견한 이슈(규정과 무관, 순수 코드 정리)**: `_enterprise_policy_review`, `_same_context_followup` 두 함수가 정의만 되어 있고 어디서도 호출되지 않는 죽은 코드였음(아마 이전 리팩터링 과정에서 호출부가 다른 함수로 대체되며 남은 잔재로 추정). 동작에는 전혀 영향 없지만 정리 차원에서 제거, `audit_screening.py`의 predicate 목록에서도 대응 항목 제거. 74개 테스트 전체 통과, drift guard 통과, dev 0.9389 그대로 유지(동작 변화 없음이 예상대로 확인됨), `submission.csv` 재생성 완료.

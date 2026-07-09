@@ -130,10 +130,10 @@ class FinalHarness:
         view = TaskView(task)
         focal = choose_focal(view)
         focal_id = str(focal.get("id") or "")
-        control = decide_control(view, focal, evidence, session, self.user_memory)
+        control = decide_control(view, focal, evidence, session)
         target = infer_target(view, focal, control, session, self.user_memory)
         scope = build_content_scope(view, focal, control, evidence)
-        policy = build_policy(view, focal, control, scope, evidence, self.user_memory)
+        policy = build_policy(view, focal, control, scope, evidence)
         plan_events = build_plan_events(focal_id, target, control, scope, policy)
         update_session_state(view, session, focal_id, target, control, scope, policy)
         update_session_memory(view, session, self.user_memory)
@@ -419,10 +419,6 @@ def _prior_success_memory_reuse(view: TaskView) -> bool:
     )
 
 
-def _enterprise_policy_review(view: TaskView) -> bool:
-    return view.record_value("enterprise_policy_recall") == "apply_standing_default_constraint"
-
-
 def _temporary_privacy_override(view: TaskView) -> bool:
     return view.record_value("temporary_override_allowed") is not None and _has_value(view, "privacy", "개인정보", "보호 조건", "duration", "적용 시간")
 
@@ -531,10 +527,6 @@ def _revoked_or_security_precondition(view: TaskView) -> bool:
     )
 
 
-def _same_context_followup(view: TaskView) -> bool:
-    return _has_value(view, "그대로 진행", "이전 요청 그대로", "같은 곳", "방금 내용", "지난번 방식", "같은 방식")
-
-
 def _direct_reuse_followup(view: TaskView) -> bool:
     return _has_value(view, "그대로 진행", "이전 요청 그대로", "지난번 방식", "같은 방식")
 
@@ -617,27 +609,6 @@ def _resolved_target_value(resolved: Any) -> str:
 
 def _explicit_user_confirmation_requested(view: TaskView) -> bool:
     return any(word in view.prompt.lower() for word in ["누구에게 어떤 범위", "사용자에게 먼저 확인", "사용자 확인", "다시 확인"])
-
-
-def _unaddressed_prior_failure_recall(view: TaskView, user_memory: dict[str, Any] | None) -> bool:
-    # "바로" (do it right away) paired with a persistent_memory_recall whose
-    # profile has a recorded last_failure_reason from a *different* session:
-    # dev-verified (and confirmed by an identically-templated screening task)
-    # that this combination means hold, unless the current prompt already
-    # asks for confirmation itself (that's handled separately by the
-    # "requires_confirmation"/_explicit_user_confirmation_requested paths).
-    # Checked against every other dev task with a persistent_memory_recall +
-    # last_failure_reason profile (9 of them) - none of those want hold from
-    # this signal alone, only this "바로"+no-confirmation-ask combination does.
-    if not user_memory or "바로" not in view.prompt:
-        return False
-    recall = view.record_value("persistent_memory_recall")
-    if not isinstance(recall, dict) or not recall.get("memory_key"):
-        return False
-    memory = user_memory.get(str(recall["memory_key"]))
-    if not isinstance(memory, dict) or not memory.get("last_failure_reason"):
-        return False
-    return not _explicit_user_confirmation_requested(view) and "물어봐" not in view.prompt
 
 
 def infer_target(
@@ -732,7 +703,6 @@ def decide_control(
     focal: dict[str, Any],
     evidence: dict[str, Any],
     session: dict[str, Any] | None = None,
-    user_memory: dict[str, Any] | None = None,
 ) -> str:
     session = session or {}
     types = view.record_types
@@ -741,8 +711,6 @@ def decide_control(
     if _is_local_update(view):
         return "proceed"
     if {"security_alert", "safety_mode"} & types or "phishing" in values or "피싱" in values or "impersonation" in values:
-        return "hold"
-    if _unaddressed_prior_failure_recall(view, user_memory):
         return "hold"
     if _prior_hold_followup(view, session) or _prior_local_only_external_followup(view, session):
         return "ask"
@@ -927,7 +895,6 @@ def build_policy(
     control: str,
     scope: dict[str, Any],
     evidence: dict[str, Any],
-    user_memory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     flags = set(evidence.get("risk_flags") or [])
     flags.discard("security_alert")
@@ -1035,7 +1002,6 @@ def build_policy(
         or _guardrail_blocked_binding(view)
         or (_external_binding_blocked(view) and not _is_local_update(view))
         or _revoked_or_security_precondition(view)
-        or _unaddressed_prior_failure_recall(view, user_memory)
     )
     # A route binding that just got confirmed (internal_binding_confirmed) means
     # whatever precondition was open (which candidate/authority applies) just
