@@ -454,7 +454,10 @@ class HarnessInterfaceTests(unittest.TestCase):
             self.assertEqual(list(rows[0]), ["submission"])
             parsed = json.loads(rows[0]["submission"])
             self.assertEqual(parsed["schema"], "scpc.final.answer.v1")
-            self.assertNotIn(b"\r\n", out.read_bytes())
+            # Match the organizer-provided sample_submission.csv exactly: UTF-8 BOM + CRLF line endings.
+            raw = out.read_bytes()
+            self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
+            self.assertIn(b"\r\n", raw)
 
     def test_focal_resolution_uses_marker_trace(self):
         objects = [

@@ -1060,7 +1060,7 @@ def write_submission_csv(payload: dict[str, Any], output_path: str | Path) -> No
     validate_payload(payload)
     path = Path(output_path)
     with path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["submission"], lineterminator="\n")
+        writer = csv.DictWriter(f, fieldnames=["submission"], lineterminator="\r\n")
         writer.writeheader()
         writer.writerow({"submission": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))})
 
