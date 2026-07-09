@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 import harness as H
-from harness import TaskView, choose_focal, load_jsonl, run_harness
+from harness import FinalHarness, TaskView, VALID_CONTROLS, VALID_SCOPE_MODES, choose_focal, load_jsonl, run_harness
 
 GATE_FUNCTIONS_VIEW = [
     "_precondition_invalidated", "_child_sleep_lighting_memory_block", "_confirmation_precondition",
@@ -113,6 +113,49 @@ def novel_record_values(tasks: list[dict[str, Any]], dev_tasks: list[dict[str, A
     return novel
 
 
+def exception_sweep(tasks: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Run every task through the harness in session/turn order, one at a time,
+    and collect (task_id, error) for every exception - instead of run_harness's
+    default behavior of aborting on the first one. A clean sweep is the only
+    way to be sure no task in this set can crash the harness at all."""
+    harness = FinalHarness()
+    ordered = sorted(tasks, key=lambda t: (str(t.get("session_id", "")), int(t.get("turn_index", 0)), str(t.get("id", ""))))
+    sessions: dict[str, dict[str, Any]] = {}
+    failures: list[tuple[str, str]] = []
+    for t in ordered:
+        sid = str(t.get("session_id", ""))
+        session = sessions.setdefault(sid, {})
+        try:
+            harness.answer_task(t, session)
+        except Exception as exc:  # noqa: BLE001 - deliberately broad, this is a sweep
+            failures.append((str(t.get("id", "?")), f"{type(exc).__name__}: {exc}"))
+    return failures
+
+
+def shape_invariants(payload: dict[str, Any]) -> list[str]:
+    """Full sweep (not a sample) of every submitted answer's shape, beyond what
+    validate_payload already enforces at generation time - this exists so the
+    check itself is visible and independently re-runnable."""
+    problems: list[str] = []
+    for task_id, answer in payload["answers"].items():
+        if answer.get("control") not in VALID_CONTROLS:
+            problems.append(f"{task_id}: invalid control {answer.get('control')!r}")
+        scope = answer.get("content_scope") or {}
+        if scope.get("mode") not in VALID_SCOPE_MODES:
+            problems.append(f"{task_id}: invalid scope mode {scope.get('mode')!r}")
+        events = answer.get("plan_events") or []
+        if len(events) > 18:
+            problems.append(f"{task_id}: {len(events)} plan_events, exceeds 18")
+        for i, ev in enumerate(events):
+            if not ev.get("verb") or not isinstance(ev.get("verb"), str):
+                problems.append(f"{task_id}: event {i} has empty/non-str verb")
+            if not isinstance(ev.get("target"), str):
+                problems.append(f"{task_id}: event {i} target is not a str")
+            if not isinstance(ev.get("args"), dict):
+                problems.append(f"{task_id}: event {i} args is not a dict")
+    return problems
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit the harness's decision coverage on an unlabeled task set.")
     parser.add_argument("--tasks", required=True, help="Path to screening_tasks.jsonl (or any unlabeled task JSONL).")
@@ -125,9 +168,28 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     tasks = load_jsonl(args.tasks)
+
+    print(f"=== Exception sweep ({len(tasks)} tasks, one task at a time) ===")
+    failures = exception_sweep(tasks)
+    if failures:
+        print(f"  {len(failures)} task(s) raised an exception:")
+        for task_id, error in failures[:20]:
+            print(f"    {task_id}: {error}")
+    else:
+        print("  none - every task produced an answer without raising")
+
     payload = run_harness(tasks, harness_name="audit")
 
-    print(f"=== Rule coverage ({len(tasks)} tasks) ===")
+    print("\n=== Answer shape invariants (full sweep, not a sample) ===")
+    problems = shape_invariants(payload)
+    if problems:
+        print(f"  {len(problems)} problem(s):")
+        for p in problems[:20]:
+            print(f"    {p}")
+    else:
+        print(f"  none - all {len(payload['answers'])} answers pass control/scope/plan_events shape checks")
+
+    print(f"\n=== Rule coverage ({len(tasks)} tasks) ===")
     counts = rule_coverage(tasks)
     for name, c in sorted(counts.items(), key=lambda x: x[1]):
         flag = "  <-- ZERO HITS, investigate" if c == 0 else ""
