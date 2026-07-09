@@ -20,6 +20,10 @@ ASK_RECORD_TYPES = {"ambiguous_target", "ambiguous_focal", "duration_ambiguous",
 HOLD_RECORD_TYPES = {"security_alert", "safety_mode", "privacy_guard"}
 PRECONDITION_RECORD_TYPES = {"target_changed_after_turn", "ops_memory_recall"}
 EXTERNAL_RECORD_TYPES = {"external_share_policy", "enterprise_policy_recall", "health_share_policy"}
+# dispatch_authority_check/route_candidate_snapshot values meaning "route settled, no
+# ambiguity left" - local_authority_confirmed/local_candidate_only are the pure-local
+# analogs of internal_binding_confirmed/single_internal_candidate.
+ROUTE_CONFIRMED_VALUES = ("internal_binding_confirmed", "route_verified", "single_internal_candidate", "local_authority_confirmed", "local_candidate_only")
 
 
 def text_of(value: Any) -> str:
@@ -448,8 +452,8 @@ def _guardrail_verified_external_route(view: TaskView) -> bool:
 def _guardrail_local_boundary_review(view: TaskView) -> bool:
     return (
         _guardrail_ladder(view)
-        and view.record_value("route_candidate_snapshot") == "single_internal_candidate"
-        and view.record_value("dispatch_authority_check") == "internal_binding_confirmed"
+        and view.record_value("route_candidate_snapshot") in {"single_internal_candidate", "local_candidate_only"}
+        and view.record_value("dispatch_authority_check") in {"internal_binding_confirmed", "local_authority_confirmed"}
         and view.record_value("share_boundary_update") == "local_update_boundary"
         and view.record_value("route_binding_order") == "boundary_after_authority"
         and not _precondition_invalidated(view)
@@ -517,7 +521,7 @@ def _prior_hold_followup(view: TaskView, session: dict[str, Any]) -> bool:
 def _prior_local_only_external_followup(view: TaskView, session: dict[str, Any]) -> bool:
     if view.record_value("resolved_target"):
         return False
-    if _stored_channel_ambiguous(view) and _has_value(view, "local_update_boundary") and _has_value(view, "internal_binding_confirmed", "single_internal_candidate"):
+    if _stored_channel_ambiguous(view) and _has_value(view, "local_update_boundary") and _has_value(view, *ROUTE_CONFIRMED_VALUES):
         return False
     prior_local = (
         session.get("last_target") == "memory_store"
@@ -690,7 +694,7 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
         return "hold"
     if _guardrail_verified_external_route(view):
         return "proceed"
-    if _has_status_update_boundary(view) and "ambiguous_target" not in types and _has_value(view, "internal_binding_confirmed", "route_verified", "single_internal_candidate"):
+    if _has_status_update_boundary(view) and "ambiguous_target" not in types and _has_value(view, *ROUTE_CONFIRMED_VALUES):
         return "proceed"
     if _has_value(view, "redacted_summary_only", "summary_only", "minimal_disclosure", "식별 가능한 세부값을 제외") or _summary_only_composite_plan(view):
         return "amend"
@@ -702,7 +706,7 @@ def decide_control(view: TaskView, focal: dict[str, Any], evidence: dict[str, An
         return "amend"
     if _has_value(view, "dispatch_blocked_until_binding", "authority_incomplete", "route_resolution_required", "target_conflict"):
         return "ask"
-    if "ambiguous_target" in types and _has_value(view, "internal_binding_confirmed", "route_verified", "single_internal_candidate"):
+    if "ambiguous_target" in types and _has_value(view, *ROUTE_CONFIRMED_VALUES):
         return "amend"
     if _has_value(view, "confirmation_required", "route_resolution_required", "target_conflict"):
         return "ask"
@@ -942,7 +946,7 @@ def update_session_state(
     authority = view.record_value("dispatch_authority_check")
     if isinstance(authority, str) and authority:
         session["route_authority"] = authority
-    session["route_confirmed"] = _has_value(view, "internal_binding_confirmed", "route_verified", "single_internal_candidate")
+    session["route_confirmed"] = _has_value(view, *ROUTE_CONFIRMED_VALUES)
 
 
 def update_session_memory(view: TaskView, session: dict[str, Any], user_memory: dict[str, Any]) -> None:
