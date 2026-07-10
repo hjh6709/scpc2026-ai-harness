@@ -138,6 +138,50 @@ class FinalHarness:
         self.user_memory: dict[str, Any] = {}
 
     def answer_task(self, task: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
+        # TERMS_GUIDE.md documents that top-tier reproducibility verification
+        # calls FinalHarness.answer_task(task, session) directly against a
+        # private task stream, not necessarily through our own run_harness().
+        # run_harness's exception/consistency safety net (added earlier this
+        # session) only protects submission.csv generation through that
+        # wrapper - it would never run in a direct-call verification
+        # environment. Duplicating the same safety net here (rather than
+        # only in run_harness) protects both call paths; run_harness keeps
+        # its own copy too, since it accepts arbitrary harness classes that
+        # may not have this built in.
+        try:
+            answer = self._compute_answer(task, session)
+        except Exception:
+            answer = _fallback_answer()
+        try:
+            _validate_single_answer(_require_task_id(task), submission_answer(answer))
+        except Exception:
+            answer = _reconcile_answer(answer)
+            try:
+                _validate_single_answer(_require_task_id(task), submission_answer(answer))
+            except Exception:
+                answer = _fallback_answer()
+        # update_session_state/update_session_memory normally run inside
+        # _compute_answer, after every field is known - if _compute_answer
+        # raised before reaching them, this turn's session update never
+        # happened, silently starving next-turn predicates like
+        # _prior_hold_followup/_prior_local_only_external_followup of any
+        # record that this turn occurred at all. Running them here
+        # unconditionally, against whatever answer actually got submitted
+        # (real, reconciled, or fallback), keeps session state consistent
+        # with the real submission either way.
+        try:
+            view = TaskView(task)
+            update_session_state(
+                view, session,
+                str(answer.get("focal_id") or ""), str(answer.get("target") or ""), str(answer.get("control") or ""),
+                answer.get("content_scope") or {}, answer.get("policy") or {},
+            )
+            update_session_memory(view, session, self.user_memory)
+        except Exception:
+            pass
+        return answer
+
+    def _compute_answer(self, task: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
         evidence = self.slm.summarize_task(task)
         view = TaskView(task)
         focal = choose_focal(view)
@@ -147,8 +191,6 @@ class FinalHarness:
         scope = build_content_scope(view, focal, control, evidence)
         policy = build_policy(view, focal, control, scope, evidence)
         plan_events = build_plan_events(focal_id, target, control, scope, policy)
-        update_session_state(view, session, focal_id, target, control, scope, policy)
-        update_session_memory(view, session, self.user_memory)
         return {
             "focal_id": focal_id,
             "target": target,

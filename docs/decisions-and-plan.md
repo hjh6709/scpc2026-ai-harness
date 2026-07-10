@@ -294,3 +294,13 @@ dev 전체: 0.9389 → **0.9444** (control 축 100%, focal 100%, target 97.5%, c
 `run_harness`의 루프를 2단 방어로 구성: (1) `answer_one()` 실패 시 `_fallback_answer()`(기존), (2) 성공했어도 `_validate_single_answer()`를 태스크마다 즉시 실행해 실패하면 `_reconcile_answer()`로 교정 후 재검증, 그래도 실패하면 최종적으로 `_fallback_answer()`. 가짜 harness로 직접 시뮬레이션: `control="proceed"`인데 `dispatch` 이벤트가 빠진 경우 → `focal_id`/`target`은 그대로 보존한 채 `dispatch` 이벤트만 주입되어 통과함을 확인. `control` 자체가 유효하지 않은(복구 불가능한) 경우 → 최종적으로 `_fallback_answer()`까지 정상적으로 떨어짐을 확인.
 
 **검증**: 74개 테스트 통과, drift guard 통과, dev 0.9384 유지, `submission.csv` 재생성 시 무변화(현재 데이터는 이 경로를 전혀 안 타는 순수 안전장치임을 재확인), `audit_screening.py` 이상 없음.
+
+## 안전장치를 `run_harness`에서 `FinalHarness.answer_task` 자체로 이전 — 검증 환경 직접 호출 대비
+
+외부 리뷰 4차 제안 검증 중 2번(fuzzy 타겟 키)·3번(동적 제외 필드)은 지난 두 라운드와 데이터가 안 바뀌어 동일하게 기각(근거 0건 재확인). 1번(예외 시 세션 상태 미기록으로 인한 멀티턴 연쇄 오류)을 확인하다가 **훨씬 더 근본적인 구조적 문제**를 발견함.
+
+`TERMS_GUIDE.md`(cell 7 markdown)에는 "검증 환경에서는 `FinalHarness.answer_task(task, session)`을 task stream 순서대로 호출"한다고 명시되어 있음 — 즉 상위권 진출 시 비공개 task stream 재현성 검증은 **우리 `run_harness`를 거치지 않고 `answer_task`를 직접 호출**할 수 있음. 그런데 지금까지 두 라운드에 걸쳐 쌓은 크래시 방지(`_fallback_answer`)와 정합성 교정(`_reconcile_answer`) 안전장치는 전부 `run_harness`의 루프 안에만 있었음 — 즉 `answer_task`가 직접 호출되는 검증 경로에서는 **이 안전장치들이 전혀 작동하지 않는** 상태였음.
+
+**조치**: `FinalHarness.answer_task`의 기존 로직을 `_compute_answer`로 분리하고, `answer_task` 자체에 `run_harness`와 동일한 2단 방어(예외 → `_fallback_answer`, 정합성 위반 → `_reconcile_answer` → 그래도 실패 시 `_fallback_answer`)를 다시 구현. `update_session_state`/`update_session_memory`도 `_compute_answer` 내부(성공 경로에서만 실행)에서 `answer_task` 바깥(성공/교정/폴백 어느 경우든 항상 실행)으로 이동 — 리뷰 1번이 지적한 "예외 시 세션 상태 미기록으로 다음 턴이 마비되는" 문제를 여기서 함께 해결함. `run_harness`의 기존 안전장치는 그대로 유지(범용 harness 클래스를 받을 수 있어 `FinalHarness` 외의 harness에는 여전히 유일한 방어선이므로) — 결과적으로 이중 방어(둘 다 안전, `FinalHarness`에서는 중복이지만 무해).
+
+**검증**: 가짜 crash를 주입해 `run_harness`를 거치지 않고 `answer_task`를 세션 내 3턴 연속 직접 호출 — 2번째 턴에서 크래시 발생 시 안전한 기본 답으로 대체되고 세션에 `last_control="ask"` 등이 정상 기록됨, 3번째 턴은 (2번째 턴 실패와 무관하게) 정상 처리됨을 확인. 74개 테스트 통과, drift guard 통과, dev 0.9384 유지, `submission.csv` 재생성 무변화, `audit_screening.py`/`tests/test_robustness.py`(직접 `FinalHarness()` 사용) 이상 없음.
