@@ -137,7 +137,23 @@ class FinalHarness:
         self.slm = FixedSLMClient()
         self.user_memory: dict[str, Any] = {}
 
+    def prepare(self, tasks: list[dict[str, Any]]) -> None:
+        # No-op. The baseline's own runner calls this defensively via
+        # getattr(harness, "prepare", None) (skips cleanly if absent), but a
+        # verification runner that calls harness.prepare([]) unconditionally
+        # would hit an AttributeError without this - cheap to define either
+        # way, and we don't preview the task stream regardless.
+        return None
+
     def answer_task(self, task: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
+        # session is documented as a dict the caller maintains per session_id
+        # and is expected to always be one (run_harness/baseline's runner
+        # both use sessions.setdefault(sid, {})) - guarding it here anyway
+        # means a caller passing None/missing it can't take down every
+        # session-dependent predicate downstream with an AttributeError that
+        # the try/except below wouldn't fully paper over (update_session_state
+        # needs a real dict to write into, not just read from).
+        session = session if isinstance(session, dict) else {}
         # TERMS_GUIDE.md documents that top-tier reproducibility verification
         # calls FinalHarness.answer_task(task, session) directly against a
         # private task stream, not necessarily through our own run_harness().
