@@ -715,6 +715,21 @@ def _prior_local_only_external_followup(view: TaskView, session: dict[str, Any])
         or session.get("last_scope_mode") == "status_only"
         or "local_only" in set(session.get("last_risk_flags") or [])
     )
+    # "dispatch" was briefly dropped from this list on the theory that it
+    # only leaks in from record type/value names ("dispatch_authority_check",
+    # "dispatch_blocked_until_binding") rather than genuine intent - but a
+    # first attempt to verify that as zero-impact was itself wrong (it
+    # treated a record-*value* leak as a "genuine" match, missing that
+    # share_boundary_update=="dispatch_blocked_until_binding" trips it the
+    # same way the record type name does). Session-threaded, removing it
+    # actually changes control on 8 screening tasks via session-state
+    # cascade to a *later* turn (ask -> hold) - a real, non-trivial effect
+    # this predicate has zero dev coverage to verify either direction of.
+    # Reverted rather than keep an unverified change with a bigger footprint
+    # than first measured; this predicate and its "prior local, now external"
+    # pattern predates this session (see git history) and already has
+    # dedicated tests, so the established behavior gets the benefit of the
+    # doubt over an unverified edit to it.
     wants_external = _has_value(view, "보내", "공유", "전달", "dispatch")
     return prior_local and wants_external and not _is_local_update(view)
 

@@ -344,3 +344,19 @@ BOM 제거 이후 재제출한 실제 리더보드 점수가 0.7509로, 이전(0
 이 두 변경의 순 효과가 하락(-0.0011)이라면, (2)번이 확실한 개선이라 가정할 때 (1)번의 음의 기여가 그보다 커야 함 — 즉 (1)번이 5건 중 일부를 더 나쁘게 만들었을 가능성이 가장 유력한 가설. per-axis/per-task 피드백이 없어 확답은 불가능하지만, 근거의 확실성이 가장 낮았던 변경을 먼저 되돌리는 게 합리적인 선택이라 판단해 `_guardrail_verified_external_route`/`_surface_resolved_channel_conflict`를 원래의 좁은 형태(`internal_binding_confirmed`/`redacted_external_boundary` 단일 값)로 되돌림. `_plain_composite_plan` 수정은 유지.
 
 **검증**: 74개 테스트 통과, drift guard 통과, dev 0.9384 유지, `submission.csv`는 이 5개 태스크만 원래대로 되돌아감. 다음 제출로 이 가설이 맞는지(점수가 0.7509보다 회복되는지) 확인 필요.
+
+## "추측 말고 정확한 근거로 고도화하라" — predicate 전수 재감사, 그리고 자기 검증 오류를 스스로 잡아낸 사례
+
+사용자가 "되돌리는 것도 추측이었다"고 정확히 지적 — 방금 `_guardrail_verified_external_route`가 실제로는 dev 검증돼 있었다는 걸 발견했는데, 이게 세션 초반 session-threading 없이 확인해서 "0건"이라 잘못 판단했던 결과였다는 걸 근거로, **전체 28개 predicate를 올바른 방법론(세션 스레딩 + dev_answers.json 대조)으로 재감사**함.
+
+**핵심 결과**: 재감사해보니 `_prior_hold_followup`(dev 0건, screening 1건)과 `_prior_local_only_external_followup`(dev 0건, screening 68건=9.7%) **딱 2개만** 진짜로 dev 검증 이력이 없음. 나머지 26개는 전부 최소 1건 이상 dev로 검증돼 있었음 — 세션 중간중간 "이건 검증 안 됐다"고 판단했던 것 상당수가 실제로는 제 측정 방식(비-threaded 확인) 오류였다는 뜻.
+
+**68건짜리 미검증 predicate를 정밀 조사**: `_prior_local_only_external_followup`의 `wants_external` 트리거 중 `"dispatch"`가 `_plain_composite_plan`의 "요약" 버그와 같은 패턴(레코드 **타입** 이름 `dispatch_authority_check`에 이미 포함된 글자)임을 발견. 처음엔 "68건 중 dispatch 단독 의존은 0건"이라고 확인하고 안전하다 판단해 제거했으나, **이 검증 자체가 틀렸음을 곧바로 재발견**: `dispatch`는 레코드 값(`share_boundary_update == "dispatch_blocked_until_binding"`)에서도 새고 있었는데, 제 첫 검증 스크립트가 "타입 이름에만 있고 다른 곳엔 없으면 위험"이라는 조건을 짤 때 레코드 *값*의 누출을 "진짜 신호"로 잘못 분류했음.
+
+제거 후 session-threaded로 전수 재확인한 결과, 이 하나의 변경이 **8개 screening 태스크의 control을 `ask`→`hold`로 바꿈** — 직접 발동 태스크가 아니라, 앞 turn의 판단이 바뀌면서 세션 상태(`last_control`/`last_scope_mode`/`last_risk_flags`)가 달라지고 그게 같은 세션의 다음 turn에 연쇄된 것. 처음의 "0건 영향" 결론은 세션 캐스케이드를 고려하지 않은 격리 검증의 한계였음.
+
+**최종 판단**: 이 태스크(`final_screening_5411a32cbec3`)를 직접 열어보니 "밖으로 나가는 내용은..."이라는 표현으로 실제로 외부 공유를 다루고 있어서, "dispatch" 제거가 진짜 버그 수정인지(트리거 단어 목록이 이 표현을 못 잡아서 원래도 놓치고 있었을 뿐) 아니면 우연한 상관관계를 깨는 것인지 dev 근거 없이는 판단 불가. 8개 태스크의 판단을 뒤집을 만큼 확신이 없어 **원상복구**. 이 predicate는 이번 세션에 새로 만든 게 아니라 프로젝트 초기부터 있었고 전용 테스트도 있는 기존 로직이라, 검증 안 된 수정보다는 기존 동작에 무게를 두기로 함.
+
+**검증**: 74개 테스트 통과, drift guard 통과, dev 0.9384 유지, `submission.csv`가 마지막 커밋과 완전히 동일함(바이트 단위로 무변화) 확인.
+
+**교훈**: "0% 영향"이라는 자체 검증 결과조차 세션 스레딩(캐스케이드 효과)까지 고려하지 않으면 틀릴 수 있다 — 이번엔 그 오류를 커밋하기 전에 재검증 과정에서 스스로 잡아냈다는 게 핵심. 근거를 찾는 작업은 "그럴듯한 원인을 찾아 고치기"가 아니라 "고친 결과를 다시 전수 검증해서 그 근거가 실제로 맞는지 재확인하기"까지 포함해야 한다는 걸 이번 라운드가 다시 보여줬다.
