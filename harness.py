@@ -332,6 +332,26 @@ def _record_values_text(view: TaskView) -> str:
     return view.record_values_text
 
 
+_PARTICLE_CHARS = "은는이가을를"
+
+
+def _particle_flexible_pattern(needle: str) -> re.Pattern[str] | None:
+    # Only bridges the *join* between two words already present in a known
+    # multi-word needle (e.g. "전달 대신" -> also matches "전달은대신") - it
+    # never touches word-final characters generally, so it can't misfire on
+    # unrelated words that happen to end in a particle-shaped syllable (은행,
+    # 있는, ...) the way a blanket particle-stripping pass over all text
+    # would. Single-word needles get no pattern (nothing to bridge).
+    words = needle.split(" ")
+    if len(words) < 2:
+        return None
+    parts = [re.escape(words[0])]
+    for word in words[1:]:
+        parts.append(rf"[{_PARTICLE_CHARS}]?\s*")
+        parts.append(re.escape(word))
+    return re.compile("".join(parts))
+
+
 def _has_value(view: TaskView, *needles: str) -> bool:
     values = (
         _record_values_text(view)
@@ -339,18 +359,27 @@ def _has_value(view: TaskView, *needles: str) -> bool:
         + " " + view.history_text.lower()
         + " " + view.personal_memory_text.lower()
     )
+    if any(needle.lower() in values for needle in needles):
+        return True
     # Stripped-whitespace fallback: catches spacing variants of a multi-word
     # phrase (e.g. "보내지말고" for "보내지 말고") that unseen data could use.
-    # Doesn't help with particle insertion ("전달 대신" vs "전달은대신") - that
-    # would need real morphological handling, not just whitespace collapsing.
     # Checked against every _has_value call actually made across all 820
     # dev+screening tasks: this normalization changes zero outcomes there, so
     # it's a pure hedge against unseen spacing variation, not a live behavior
     # change on data we can verify.
-    if any(needle.lower() in values for needle in needles):
-        return True
     values_compact = re.sub(r"\s+", "", values)
-    return any(re.sub(r"\s+", "", needle.lower()) in values_compact for needle in needles)
+    if any(re.sub(r"\s+", "", needle.lower()) in values_compact for needle in needles):
+        return True
+    # Particle-insertion fallback ("전달 대신" vs "전달은대신"): scoped to the
+    # word-join point of our own curated multi-word needles only, so it can't
+    # reinterpret arbitrary unrelated text the way stripping particles from
+    # all_text globally would. Also checked empty-impact across all 820
+    # dev+screening tasks before adding.
+    for needle in needles:
+        pattern = _particle_flexible_pattern(needle.lower())
+        if pattern is not None and pattern.search(values):
+            return True
+    return False
 
 
 def _precondition_invalidated(view: TaskView) -> bool:
