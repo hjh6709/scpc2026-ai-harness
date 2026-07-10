@@ -1066,6 +1066,19 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
     if _guardrail_verified_external_route(view) and control == "proceed":
         return {"mode": "raw", "allowed_fields": ["summary", "title"], "excluded_fields": [], "requires_user_confirmation": False}
     if _plain_composite_plan(view) and control == "proceed":
+        # _plain_composite_plan's own gate phrase set includes "파일 요약"
+        # (file summary), so a bare "요약" check here would be nearly always
+        # true and useless as a discriminator - found via a 10-task cluster
+        # sharing one trailing clause where 9/10 correctly hold/ask/amend but
+        # this branch overrode the 10th to "raw" despite its own clause
+        # literally saying raw text must NOT be included. Keyed on "raw 문장"
+        # (the specific phrase that clause uses) plus an exclusion word
+        # instead, since that's what's actually absent from the 5 dev cases
+        # reaching this branch (including two whose correct answer is "raw"
+        # and would have broken under a bare "요약" trigger) and present only
+        # on the one screening task with the contradiction.
+        if _has_value(view, "raw 문장") and _has_value(view, "포함하지", "제외", "가리", "빼"):
+            return {"mode": "summary", "allowed_fields": ["summary", "title"], "excluded_fields": excluded or ["raw_quote"], "requires_user_confirmation": False}
         return {"mode": "raw", "allowed_fields": ["summary", "title"], "excluded_fields": [], "requires_user_confirmation": False}
     if control == "amend":
         needs_confirmation = _target_ambiguity_signal(view)
