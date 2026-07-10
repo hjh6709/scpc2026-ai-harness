@@ -1070,12 +1070,12 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
         }
     if _guardrail_verified_external_route(view) and control == "proceed":
         prompt = view.prompt.lower()
-        if any(word in prompt for word in ["요약 공유", "요약만", "요약본만", "요약 수준", "제외", "포함하지", "익명"]):
+        if any(word in prompt for word in ["요약 공유", "요약만", "요약본만", "요약 수준", "제외", "포함하지", "익명", "최소 요약", "덜어내"]):
             return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": sorted(contains & SENSITIVE_FIELDS) or ["raw_quote"], "requires_user_confirmation": False}
         return {"mode": "raw", "allowed_fields": ["summary", "title"], "excluded_fields": [], "requires_user_confirmation": False}
     if _plain_composite_plan(view) and control == "proceed":
         prompt = view.prompt.lower()
-        if any(word in prompt for word in ["요약 공유", "요약만", "요약본만", "요약 수준", "제외", "포함하지", "익명"]):
+        if any(word in prompt for word in ["요약 공유", "요약만", "요약본만", "요약 수준", "제외", "포함하지", "익명", "최소 요약", "덜어내"]):
             return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": sorted(contains & SENSITIVE_FIELDS) or ["raw_quote"], "requires_user_confirmation": False}
         return {"mode": "raw", "allowed_fields": ["summary", "title"], "excluded_fields": [], "requires_user_confirmation": False}
     if control == "amend":
