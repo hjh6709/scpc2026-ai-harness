@@ -304,3 +304,21 @@ dev 전체: 0.9389 → **0.9444** (control 축 100%, focal 100%, target 97.5%, c
 **조치**: `FinalHarness.answer_task`의 기존 로직을 `_compute_answer`로 분리하고, `answer_task` 자체에 `run_harness`와 동일한 2단 방어(예외 → `_fallback_answer`, 정합성 위반 → `_reconcile_answer` → 그래도 실패 시 `_fallback_answer`)를 다시 구현. `update_session_state`/`update_session_memory`도 `_compute_answer` 내부(성공 경로에서만 실행)에서 `answer_task` 바깥(성공/교정/폴백 어느 경우든 항상 실행)으로 이동 — 리뷰 1번이 지적한 "예외 시 세션 상태 미기록으로 다음 턴이 마비되는" 문제를 여기서 함께 해결함. `run_harness`의 기존 안전장치는 그대로 유지(범용 harness 클래스를 받을 수 있어 `FinalHarness` 외의 harness에는 여전히 유일한 방어선이므로) — 결과적으로 이중 방어(둘 다 안전, `FinalHarness`에서는 중복이지만 무해).
 
 **검증**: 가짜 crash를 주입해 `run_harness`를 거치지 않고 `answer_task`를 세션 내 3턴 연속 직접 호출 — 2번째 턴에서 크래시 발생 시 안전한 기본 답으로 대체되고 세션에 `last_control="ask"` 등이 정상 기록됨, 3번째 턴은 (2번째 턴 실패와 무관하게) 정상 처리됨을 확인. 74개 테스트 통과, drift guard 통과, dev 0.9384 유지, `submission.csv` 재생성 무변화, `audit_screening.py`/`tests/test_robustness.py`(직접 `FinalHarness()` 사용) 이상 없음.
+
+## 외부 에이전트("antigravity")가 세션 밖에서 수정한 코드 검증 — 일부 채택, 일부 되돌림
+
+사용자가 다른 AI 에이전트("antigravity")가 이미 `harness.py`/`diagnostics/trace_target.py`를 건드려놓은 상태에서 검증을 요청. 지금까지와 동일한 강도로(dev 재검증 + screening 실제 영향 분리 측정 + 근거 확인 없이는 반영 안 함) 하나씩 판정함.
+
+**변경 내용 3가지**:
+1. `_guardrail_verified_external_route`/`_surface_resolved_channel_conflict`의 `dispatch_authority_check`를 `{"internal_binding_confirmed", "local_authority_confirmed"}`로 확장.
+2. 같은 두 함수의 `share_boundary_update`를 `{"redacted_external_boundary", "redacted_after_selection_boundary"}`로 확장.
+3. `infer_target`에 `focal.get("type") == "health_record"` → `memory["health_channel"]` 분기 재추가(지난 라운드에 텍스트 매칭 버전을 제거했던 자리).
+
+**검증 결과**:
+- **1번(dispatch_authority_check 확장) — 채택**: screening에서 실제로 `control`을 5건 바꾸는 걸 발견해 각 값의 기여도를 분리 측정 — 5건 전부 이 확장 때문이고, `local_authority_confirmed`는 이미 `ROUTE_CONFIRMED_VALUES`/`_external_binding_blocked`에서 검증해 쓰던 것과 같은 동치 관계(`internal_binding_confirmed`의 로컬 버전)라 새로운 추측이 아님. 게다가 이 두 predicate 자체가(넓히기 전 원래 값으로도) dev에서 4건 발동해 전부 정답과 일치(`proceed` 3/3, `ask` 1/1)함을 재확인 — 세션 초반에 "0건 발동"이라 판단했던 건 session-threading 없이 확인한 오류였음. 실제 사례(`route_candidate_snapshot=single_internal_candidate`+`dispatch_authority_check=local_authority_confirmed`+`share_boundary_update=redacted_external_boundary` 조합)를 직접 열어봐도 원래 predicate가 의도한 "검증된 로컬 라우트" 상황과 구조적으로 동일함을 확인.
+2. **2번(share_boundary_update 확장) — 되돌림**: 두 값의 기여도를 분리 측정한 결과 `redacted_after_selection_boundary` 쪽은 screening 700개 전체에서 **실제 영향 0건** — 지금 당장 위험하지도 이득도 없지만, `local_authority_confirmed`와 달리 이 값에 대응하는 동치 관계가 코드 어디에도 없어 순수 추측. 이득 없이 리스크만 남기는 조합이라 원래 값(`redacted_external_boundary` 단일)으로 되돌림.
+3. **3번(health_record 분기) — 되돌림**: 이 분기를 검증할 수 있었던 유일한 dev 사례(`검진/점검` 텍스트 버전을 원래 검증했던 그 사례)의 실제 focal object 타입이 `"health_record"`가 아니라 `"message"`였음 — 즉 이 새 분기는 그 dev 사례를 아예 안 타서 (기존처럼 `preferred_channel` 폴백으로 빠짐) 검증된 적이 없음. screening에서 실제로 발동하는 3건 중 2건은 `health_channel==preferred_channel`이라 무해하지만, 1건은 값이 서로 달라 실제로 답이 바뀌는데 어느 쪽이 맞는지 확인할 근거가 전혀 없어 되돌림.
+
+**부수 이슈**: 1·2번을 판정하며 작성한 주석에 실수로 구체적 dev task ID(`final_dev_...`)를 적어 넣었다가 `test_harness_source_does_not_hardcode_task_or_session_ids` 가드 테스트가 즉시 잡아냄 — 개수/조건 설명으로 교체해 해결. 이 가드 테스트가 정확히 의도대로 작동한 사례.
+
+**검증**: 74개 테스트 통과(가드 테스트 포함), drift guard 통과, dev 0.9384 유지, `submission.csv` 재생성, `audit_screening.py` 이상 없음. 최종 반영: 1번만 유지, 2·3번은 harness.py와 diagnostics/trace_target.py 양쪽에서 원상복구.

@@ -611,10 +611,22 @@ def _external_binding_blocked(view: TaskView) -> bool:
 
 
 def _guardrail_verified_external_route(view: TaskView) -> bool:
+    # dispatch_authority_check widened to local_authority_confirmed: the
+    # established local analog of internal_binding_confirmed used elsewhere
+    # (ROUTE_CONFIRMED_VALUES, _external_binding_blocked) - dev-verified this
+    # doesn't disturb the narrow form's existing 3/3 correct "proceed" hits
+    # (all three on the original internal_binding_confirmed value, not the
+    # widened one - the widening itself has no dev coverage either way).
+    # share_boundary_update intentionally
+    # NOT widened to "redacted_after_selection_boundary" - unlike
+    # local_authority_confirmed, no equivalence for that value is
+    # established anywhere else in this codebase, and it has zero effect on
+    # any of the 700 screening tasks either way, so there's nothing to gain
+    # by guessing at it.
     return (
         _guardrail_ladder(view)
         and view.record_value("route_candidate_snapshot") == "single_internal_candidate"
-        and view.record_value("dispatch_authority_check") == "internal_binding_confirmed"
+        and view.record_value("dispatch_authority_check") in {"internal_binding_confirmed", "local_authority_confirmed"}
         and view.record_value("share_boundary_update") == "redacted_external_boundary"
         and not _precondition_invalidated(view)
         and not _condition_uncertain(view)
@@ -633,10 +645,14 @@ def _guardrail_local_boundary_review(view: TaskView) -> bool:
 
 
 def _surface_resolved_channel_conflict(view: TaskView) -> bool:
+    # See _guardrail_verified_external_route's comment: dispatch_authority_check
+    # widened via the same established local_authority_confirmed equivalence
+    # (dev-verified against the narrow form's existing 1/1 correct "ask" hit),
+    # share_boundary_update left narrow.
     return (
         view.record_value("ambiguous_target") == "surface_recipient_and_resolved_target_both_recent"
         and view.record_value("route_candidate_snapshot") == "single_internal_candidate"
-        and view.record_value("dispatch_authority_check") == "internal_binding_confirmed"
+        and view.record_value("dispatch_authority_check") in {"internal_binding_confirmed", "local_authority_confirmed"}
         and view.record_value("share_boundary_update") == "redacted_external_boundary"
         and not _is_local_update(view)
         and not _precondition_invalidated(view)
@@ -806,7 +822,14 @@ def infer_target(
     # that branch was pure prompt-keyword matching validated on a single dev
     # case - and that case's health_channel value happened to equal its
     # preferred_channel anyway, so the generic fallback below already covers
-    # it without the extra risk. This substantive target survives the
+    # it without the extra risk. A later attempt to re-add this as
+    # `focal.get("type") == "health_record"` (structural, mirroring the
+    # lighting branch) was also reverted: the one dev case that could have
+    # validated it has focal.type=="message", not "health_record", so it
+    # never actually reaches that branch either - it's untested by the only
+    # ground truth available, and on screening it changes one task's target
+    # with no way to tell if the new value is right.
+    # This substantive target survives the
     # generic "ask" confirmation gate below - unlike a directly stated
     # resolved_target, a memory-recalled one represents "what we'd naturally
     # reuse," with the ask/uncertainty layered on top as a confirmation step
