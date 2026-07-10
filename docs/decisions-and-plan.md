@@ -284,3 +284,13 @@ dev 전체: 0.9389 → **0.9444** (control 축 100%, focal 100%, target 97.5%, c
 **검증**: 74개 테스트 통과, drift guard 통과, dev 0.9384 유지, `submission.csv` 재생성(무변화 확인), `audit_screening.py` 재확인 이상 없음.
 
 **이번 라운드의 교훈**: 리뷰 제안을 판정할 때 "코드가 버그가 있다"와 "코드를 고치면 쓸모 있다"는 별개의 질문이었음. 1·2·3번은 고쳐도 검증할 근거가 없거나(3번) 실제 정답과 반대(1·2번)라 "고친 버전"이 의미가 없었지만, 4번은 버그(전역 조사 제거의 오탐 위험)만 고치는 게 아니라 **위험의 범위 자체를 우리가 이미 신뢰하는 needle 목록으로 좁히는 재설계**를 통해 안전하게 살릴 수 있었음 — 반대 제안을 그대로 고치는 게 아니라, 그 제안이 정말 원하는 것(조사 변형 방어)을 더 안전한 다른 방식으로 구현하는 게 핵심이었음.
+
+## 정합성 검증 실패로 인한 전체 크래시 방어 — `_reconcile_answer` 추가
+
+사용자가 외부 리뷰의 세 번째 제안(정합성 자동 교정 래퍼)을 검증 요청. 이번엔 진짜 구멍이었음: `run_harness`는 태스크 루프가 **다 끝난 뒤 한 번에** `validate_payload`→`validate_answer_consistency`를 호출하는데, 지난 라운드에 추가한 try/except는 루프 **안**의 `answer_one()` 호출만 감싸고 있어서, "예외는 안 던지지만 `content_scope`/`plan_events` 조합이 `validate_answer_consistency`의 규칙(hold/ask/status_only/amend/proceed별 mode·verb 제약)을 위반하는" 케이스는 전혀 못 잡음 — 이 경우 루프가 전부 끝난 뒤에야 `ValueError`가 터져서 이미 계산된 700개 전부가 날아감.
+
+리뷰어의 원안은 방향은 맞지만 그대로 쓰지 않고 재설계함: `validate_answer_consistency`의 정확한 5개 분기(elif 순서: hold, ask, `scope.mode=="status_only"`, amend, proceed)를 그대로 반영한 `_reconcile_answer()`를 작성하되, **`_fallback_answer()`처럼 답 전체를 갈아엎지 않고 `focal_id`/`target`은 보존**하도록 함 — scope/policy/plan_events만 해당 control이 요구하는 최소 조합으로 교정. `validate_payload`의 per-answer 검증 로직도 `_validate_single_answer()`로 분리해 재사용(단순히 `validate_answer_consistency`만이 아니라 `scope.mode` 유효성, `user_response`/`counterfactual` 비어있음 등 나머지 검증도 다 커버하기 위함).
+
+`run_harness`의 루프를 2단 방어로 구성: (1) `answer_one()` 실패 시 `_fallback_answer()`(기존), (2) 성공했어도 `_validate_single_answer()`를 태스크마다 즉시 실행해 실패하면 `_reconcile_answer()`로 교정 후 재검증, 그래도 실패하면 최종적으로 `_fallback_answer()`. 가짜 harness로 직접 시뮬레이션: `control="proceed"`인데 `dispatch` 이벤트가 빠진 경우 → `focal_id`/`target`은 그대로 보존한 채 `dispatch` 이벤트만 주입되어 통과함을 확인. `control` 자체가 유효하지 않은(복구 불가능한) 경우 → 최종적으로 `_fallback_answer()`까지 정상적으로 떨어짐을 확인.
+
+**검증**: 74개 테스트 통과, drift guard 통과, dev 0.9384 유지, `submission.csv` 재생성 시 무변화(현재 데이터는 이 경로를 전혀 안 타는 순수 안전장치임을 재확인), `audit_screening.py` 이상 없음.

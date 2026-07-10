@@ -1322,6 +1322,79 @@ def _fallback_answer() -> dict[str, Any]:
     }
 
 
+def _reconcile_answer(answer: dict[str, Any]) -> dict[str, Any]:
+    # _fallback_answer only covers answer_task *raising*. It doesn't cover
+    # answer_task returning successfully with a content_scope/policy/
+    # plan_events combination validate_answer_consistency rejects (e.g. an
+    # unseen record combination steering build_content_scope and
+    # build_plan_events to disagree) - that ValueError happens in
+    # validate_payload *after* the whole task loop below has already run,
+    # outside any per-task try/except, and would abort run_harness entirely.
+    # This mirrors validate_answer_consistency's own branches (same elif
+    # order: hold/ask/status_only/amend/proceed) to force exactly the
+    # combination it requires, while leaving focal_id/target untouched -
+    # unlike replacing the whole answer with _fallback_answer(), this keeps
+    # whatever focal/target credit the real logic already got right even if
+    # only the scope/plan tail needed correcting.
+    control = answer.get("control")
+    focal_id = str(answer.get("focal_id") or "")
+    target = str(answer.get("target") or "")
+    scope = dict(answer.get("content_scope") or {})
+    policy = dict(answer.get("policy") or {})
+    events = [dict(ev) for ev in (answer.get("plan_events") or []) if isinstance(ev, dict)]
+
+    if control == "hold":
+        scope = {"mode": "none", "allowed_fields": [], "excluded_fields": [], "requires_user_confirmation": False}
+        policy["requires_confirmation"] = False
+        events = [
+            {"verb": "read", "target": focal_id, "args": {"purpose": "inspect_context"}},
+            {"verb": "guard", "target": focal_id, "args": {"reason": "strict_policy_block"}},
+        ]
+    elif control == "ask":
+        scope["requires_user_confirmation"] = True
+        policy["requires_confirmation"] = True
+        events = [ev for ev in events if ev.get("verb") not in {"dispatch", "update"}]
+        if "clarify" not in {ev.get("verb") for ev in events}:
+            events.append({"verb": "clarify", "target": "user", "args": {"reason": "clarification_required"}})
+    elif scope.get("mode") == "status_only":
+        events = [ev for ev in events if ev.get("verb") not in {"dispatch", "redact", "clarify", "guard"}]
+        if "update" not in {ev.get("verb") for ev in events}:
+            events.append({"verb": "update", "target": focal_id, "args": {"state": "local_status_only"}})
+    elif control == "amend":
+        scope["mode"] = "redacted"
+        events = [ev for ev in events if ev.get("verb") not in {"clarify", "guard", "update"}]
+        present = {ev.get("verb") for ev in events}
+        if "redact" not in present:
+            events.append({"verb": "redact", "target": focal_id, "args": {"remove": "sensitive_fields"}})
+        if "dispatch" not in present:
+            events.append({"verb": "dispatch", "target": target, "args": {"scope": "redacted"}})
+    elif control == "proceed":
+        events = [ev for ev in events if ev.get("verb") not in {"clarify", "guard", "redact"}]
+        if "dispatch" not in {ev.get("verb") for ev in events}:
+            events.append({"verb": "dispatch", "target": target, "args": {"scope": scope.get("mode", "summary")}})
+
+    if scope.get("mode") not in VALID_SCOPE_MODES:
+        scope["mode"] = "summary"
+    scope.setdefault("allowed_fields", [])
+    scope.setdefault("excluded_fields", [])
+    scope.setdefault("requires_user_confirmation", False)
+    policy.setdefault("risk_flags", [])
+    policy.setdefault("violations", [])
+    policy.setdefault("requires_confirmation", False)
+
+    answer = dict(answer)
+    answer["content_scope"] = scope
+    answer["policy"] = policy
+    answer["plan_events"] = events[:18]
+    if not isinstance(answer.get("user_response"), str) or not answer["user_response"]:
+        answer["user_response"] = user_response(str(control), target, scope)
+    if not isinstance(answer.get("audit_tags"), list):
+        answer["audit_tags"] = sorted(policy.get("risk_flags") or [])
+    if not isinstance(answer.get("counterfactual"), str) or not answer["counterfactual"]:
+        answer["counterfactual"] = "최신 기록, 동의 상태, 공유 범위, 보안 신호가 바뀌면 판단이 달라질 수 있습니다."
+    return answer
+
+
 def run_harness(tasks: list[dict[str, Any]], harness_cls: type = FinalHarness, *, harness_name: str = "scpc_rule_harness") -> dict[str, Any]:
     ordered = sorted(tasks, key=lambda t: (str(t.get("session_id", "")), _safe_turn_index(t.get("turn_index")), _require_task_id(t)))
     harness = harness_cls()
@@ -1334,6 +1407,14 @@ def run_harness(tasks: list[dict[str, Any]], harness_cls: type = FinalHarness, *
             answer = answer_one(harness, task, session)
         except Exception:
             answer = _fallback_answer()
+        try:
+            _validate_single_answer(_require_task_id(task), submission_answer(answer))
+        except Exception:
+            answer = _reconcile_answer(answer)
+            try:
+                _validate_single_answer(_require_task_id(task), submission_answer(answer))
+            except Exception:
+                answer = _fallback_answer()
         answers[_require_task_id(task)] = submission_answer(answer)
     payload = {
         "schema": SUBMISSION_SCHEMA,
@@ -1367,29 +1448,36 @@ def validate_payload(payload: dict[str, Any], expected_ids: set[str] | None = No
     if meta.get("uses_external_api") is not False or meta.get("temperature") != 0.0 or meta.get("seed") != 42:
         raise ValueError("official deterministic metadata is required")
     for task_id, answer in answers.items():
-        for field in [
-            "focal_id", "target", "control", "content_scope", "policy", "plan_events",
-            "user_response", "audit_tags", "counterfactual",
-        ]:
-            if field not in answer:
-                raise ValueError(f"{task_id} missing {field}")
-        if answer["control"] not in VALID_CONTROLS:
-            raise ValueError(f"{task_id} has invalid control")
-        if not isinstance(answer.get("content_scope"), dict):
-            raise ValueError(f"{task_id} content_scope must be an object")
-        if not isinstance(answer.get("policy"), dict):
-            raise ValueError(f"{task_id} policy must be an object")
-        if answer["content_scope"].get("mode") not in VALID_SCOPE_MODES:
-            raise ValueError(f"{task_id} has invalid scope mode")
-        if not isinstance(answer.get("plan_events"), list) or len(answer["plan_events"]) > 18:
-            raise ValueError(f"{task_id} has invalid plan_events")
-        if not isinstance(answer.get("user_response"), str) or not answer["user_response"]:
-            raise ValueError(f"{task_id} user_response must be a non-empty string")
-        if not isinstance(answer.get("audit_tags"), list):
-            raise ValueError(f"{task_id} audit_tags must be a list")
-        if not isinstance(answer.get("counterfactual"), str) or not answer["counterfactual"]:
-            raise ValueError(f"{task_id} counterfactual must be a non-empty string")
-        validate_answer_consistency(str(task_id), answer)
+        _validate_single_answer(str(task_id), answer)
+
+
+def _validate_single_answer(task_id: str, answer: dict[str, Any]) -> None:
+    # Factored out of validate_payload so run_harness can run the exact same
+    # per-answer checks task-by-task (see _reconcile_answer) instead of only
+    # discovering a violation once, after the whole batch, in validate_payload.
+    for field in [
+        "focal_id", "target", "control", "content_scope", "policy", "plan_events",
+        "user_response", "audit_tags", "counterfactual",
+    ]:
+        if field not in answer:
+            raise ValueError(f"{task_id} missing {field}")
+    if answer["control"] not in VALID_CONTROLS:
+        raise ValueError(f"{task_id} has invalid control")
+    if not isinstance(answer.get("content_scope"), dict):
+        raise ValueError(f"{task_id} content_scope must be an object")
+    if not isinstance(answer.get("policy"), dict):
+        raise ValueError(f"{task_id} policy must be an object")
+    if answer["content_scope"].get("mode") not in VALID_SCOPE_MODES:
+        raise ValueError(f"{task_id} has invalid scope mode")
+    if not isinstance(answer.get("plan_events"), list) or len(answer["plan_events"]) > 18:
+        raise ValueError(f"{task_id} has invalid plan_events")
+    if not isinstance(answer.get("user_response"), str) or not answer["user_response"]:
+        raise ValueError(f"{task_id} user_response must be a non-empty string")
+    if not isinstance(answer.get("audit_tags"), list):
+        raise ValueError(f"{task_id} audit_tags must be a list")
+    if not isinstance(answer.get("counterfactual"), str) or not answer["counterfactual"]:
+        raise ValueError(f"{task_id} counterfactual must be a non-empty string")
+    validate_answer_consistency(str(task_id), answer)
 
 
 def _event_verbs(answer: dict[str, Any]) -> set[str]:
