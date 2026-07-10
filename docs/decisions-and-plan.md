@@ -368,3 +368,15 @@ BOM 제거 이후 재제출한 실제 리더보드 점수가 0.7509로, 이전(0
 **고도화 포인트 1(`_plain_composite_plan` 트리거 단어 보강) — 채택**: `final_screening_8358c7869601`이 "전달 범위는 최소 요약으로 제한하고 민감 세부값은 덜어내야 한다"고 명시하는데도 `proceed+raw`로 자기모순 출력하는 걸 확인(같은 클래스의 버그, 기존에 고친 "raw 문장" 트리거로는 이 표현을 못 잡음). "최소 요약"/"덜어내"가 어떤 record type/value 이름에도 안 겹치는 걸 먼저 확인(구조적 누출 없음). 세션 스레딩까지 포함한 전수 비교로 검증: dev 6건 불일치 그대로(새 불일치 0건), screening은 정확히 이 1개 태스크만 바뀌고(`raw`→`summary`) 캐스케이드 효과 없음. 기존 트리거 리스트에 두 단어 추가.
 
 **검증**: 74개 테스트 통과, drift guard 통과, dev 0.9384 유지, `submission.csv`는 이 1개 태스크만 변경, `audit_screening.py` 이상 없음.
+
+## 리스크 자체 검증형 제안 2건 — 1건 반증 확인(hold 우선순위 가드), 1건 채택(doctor_note "전제" 트리거)
+
+**타겟 미스매치 3건 재확인**: 이미 이 세션에서 독립적으로 도달했던 결론(고립 세션이라 이전 turn이 파일에 없어 구조적으로 해결 불가능)과 정확히 일치 — 추가 조치 없음.
+
+**`0937ccedef94`(control 미스매치) "우선한다" 키워드 제안 — 리스크 실측으로 반증됨**: 제안자가 스스로 "`_precondition_invalidated`에 '우선한다' 추가 시 dev 36/120 붕괴(0.9384→0.6828)"를 시뮬레이션해 반증한 걸 재현 확인(정확히 일치). 대안으로 제시한 "보류 후보로 남겼고"도 검증: dev 14건/screening 0건("표면 문장"과 같은 dev-only 패턴)이고, 그 14건 중 hold는 3건뿐(8건은 proceed) — "보류"라는 글자만 겹칠 뿐 의미상 focal 후보 선택 얘기지 control hold와 무관함을 확인. 두 접근 모두 반증되어, 이전에 되돌린 `_unaddressed_prior_failure_recall`까지 포함해 이 1건에 대한 세 가지 독립적 시도가 전부 근거로 기각됨 — 이 1건은 안전하게 고칠 방법이 없다는 결론이 이제 세 번 교차검증됨.
+
+**`891dd2e62a0a`(content_scope.mode) "전제" 트리거 — 채택**: 지난 라운드에 "새 전제가 확정되지"(screening 0건)를 반증하고 되돌렸던 바로 그 자리에, 더 짧은 어간 "전제"로 재시도한 제안. 이번엔 screening 30회 재현(해당 predicate의 실제 도달 범위 내 1/7건 포함)을 확인 — dev-only가 아님. dev 2건(891dd2e62a0a=redacted, 5181075801a4=summary)도 정확히 구분(has_전제=True/False가 정답과 일치). 적용 후 dev 0.9384→**0.9389** 재현, screening 세션 스레딩 전수 비교로 정확히 1건만 변경(캐스케이드 없음) 확인.
+
+**personal_memory 기반 numeric_value 강제 제외 제안 — 기각**: "가족방에는 건강 수치를 직접 쓰지 말고..." 문구를 가진 family_room 타겟 케이스를 dev+screening 전체에서 찾은 결과 7건 전부 이미 다른 구조적 신호로 hold 상태 — 실제로 새는(proceed/amend인데 numeric_value 안 빠짐) 케이스는 **0건**. 순수 가상 시나리오. 게다가 해당 health_record 객체는 이미 자기 `contains`에 numeric_value를 구조적으로 선언하고 있어 기존 `contains & SENSITIVE_FIELDS` 메커니즘이 이미 커버 — 검증 불가능한 하드코딩 규칙을 추가할 필요도 근거도 없음.
+
+**검증**: 74개 테스트 통과, drift guard 통과, dev **0.9389**(신기록), `submission.csv`는 "전제" 트리거로 바뀐 1개 태스크만 반영, `audit_screening.py` 이상 없음.

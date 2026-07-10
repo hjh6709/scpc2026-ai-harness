@@ -1009,12 +1009,18 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
         # excluded_fields is always ["raw_quote"] here regardless of phrasing
         # (dev-verified across both phrasings this predicate matches). mode
         # used to split redacted-vs-summary on one exact confirmation phrase
-        # ("새 전제가 확정되지"), but that phrase never occurs anywhere in the
-        # 700 screening tasks - the same profile (a single dev-only literal
-        # match with no record/field-level backing) as the earlier
-        # dev-vs-leaderboard overfitting this project already hit once, so
-        # collapsed to the single value the broader "ask" fallback also uses.
-        return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
+        # ("새 전제가 확정되지"), which was reverted since that exact phrase
+        # never occurs anywhere in the 700 screening tasks - the same profile
+        # (a single dev-only literal match with no record/field-level
+        # backing) as the earlier dev-vs-leaderboard overfitting this
+        # project already hit once. Re-tried with the bare stem "전제"
+        # instead of the full phrase: unlike the full phrase, "전제" recurs
+        # 30 times across dev+screening (including inside this exact
+        # predicate's own reachable population on screening, not just
+        # elsewhere in unrelated tasks), and still cleanly discriminates
+        # both dev cases this branch covers (redacted/summary, 2/2).
+        mode = "redacted" if _has_value(view, "전제") else "summary"
+        return {"mode": mode, "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
     if control == "ask" and _guardrail_ladder(view):
         if view.record_value("share_boundary_update") == "redacted_external_boundary" and _confirmation_precondition(view):
             return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
