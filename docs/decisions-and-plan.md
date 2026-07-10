@@ -334,3 +334,13 @@ dev 전체: 0.9389 → **0.9444** (control 축 100%, focal 100%, target 97.5%, c
 **검증**: 74개 테스트 통과, drift guard 통과, dev 0.9384 그대로(재검증된 진짜 무영향), `submission.csv`에서 정확히 이 1개 태스크만 변경됨(`proceed/summary/excluded=[raw_quote]`로 정정) 확인, `audit_screening.py` 이상 없음.
 
 **교훈**: "dev 영향 0%"라는 주장도 직접 재현해서 검증하기 전까지는 사실로 받아들이지 않는다 — 이번엔 근거가 되는 근본 원인(버그 자체)은 정확했지만 제안된 구체적 수정(트리거 단어 선택)은 검증 없이 나온 추정이었고, 실제로 재현해보니 그 추정이 틀렸음이 드러났다.
+
+## 실제 제출 점수 0.752 → 0.7509로 소폭 하락 — `local_authority_confirmed` 확장 되돌림
+
+BOM 제거 이후 재제출한 실제 리더보드 점수가 0.7509로, 이전(0.752)보다 소폭 하락했다는 피드백을 받음. 그 사이 `submission.csv` 내용을 실제로 바꾼 변경은 두 가지뿐임을 재확인: (1) antigravity의 `dispatch_authority_check`/`share_boundary_update` 확장(`local_authority_confirmed`/`redacted_after_selection_boundary`, screening 5개 태스크의 control 변경), (2) `_plain_composite_plan` 자기모순 버그 수정(1개 태스크). 나머지(BOM, personal_memory, WM-ref 일반화, 조사-유연 매칭, 크래시/정합성 방어)는 전부 `submission.csv` 내용에 영향 0임을 이미 각각 확인해뒀던 것들.
+
+(2)번은 태스크 자신의 텍스트와 정면으로 모순되던 걸 고친 것이라 점수를 깎았을 가능성이 낮음. (1)번은 "이미 검증된 동치 관계(`local_authority_confirmed` ~ `internal_binding_confirmed`)를 유추로 확장"한 것으로, 그 UNDERLYING 동치 관계 자체는 다른 곳에서 dev 검증됐지만 **이 두 predicate에서 확장된 값 자체는 한 번도 dev로 검증된 적이 없었음** — 5개 screening 태스크에 살아있는 채로 제출됐던 유일한 미검증 변경.
+
+이 두 변경의 순 효과가 하락(-0.0011)이라면, (2)번이 확실한 개선이라 가정할 때 (1)번의 음의 기여가 그보다 커야 함 — 즉 (1)번이 5건 중 일부를 더 나쁘게 만들었을 가능성이 가장 유력한 가설. per-axis/per-task 피드백이 없어 확답은 불가능하지만, 근거의 확실성이 가장 낮았던 변경을 먼저 되돌리는 게 합리적인 선택이라 판단해 `_guardrail_verified_external_route`/`_surface_resolved_channel_conflict`를 원래의 좁은 형태(`internal_binding_confirmed`/`redacted_external_boundary` 단일 값)로 되돌림. `_plain_composite_plan` 수정은 유지.
+
+**검증**: 74개 테스트 통과, drift guard 통과, dev 0.9384 유지, `submission.csv`는 이 5개 태스크만 원래대로 되돌아감. 다음 제출로 이 가설이 맞는지(점수가 0.7509보다 회복되는지) 확인 필요.

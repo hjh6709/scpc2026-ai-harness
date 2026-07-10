@@ -54,6 +54,8 @@ def infer_target_traced(
                 return str(memory["last_success_target"]), "T04b_recall_last_success_target"
             if focal.get("type") == "iot_routine" and "light" in (focal_attrs.get("actions") or []) and memory.get("dusk_room"):
                 return str(memory["dusk_room"]), "T04c_recall_dusk_room"
+            if focal.get("type") == "health_record" and memory.get("health_channel"):
+                return str(memory["health_channel"]), "T04d_recall_health_channel"
             if memory.get("preferred_channel"):
                 return str(memory["preferred_channel"]), "T04e_recall_preferred_channel"
 

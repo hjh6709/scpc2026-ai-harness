@@ -611,22 +611,18 @@ def _external_binding_blocked(view: TaskView) -> bool:
 
 
 def _guardrail_verified_external_route(view: TaskView) -> bool:
-    # dispatch_authority_check widened to local_authority_confirmed: the
-    # established local analog of internal_binding_confirmed used elsewhere
-    # (ROUTE_CONFIRMED_VALUES, _external_binding_blocked) - dev-verified this
-    # doesn't disturb the narrow form's existing 3/3 correct "proceed" hits
-    # (all three on the original internal_binding_confirmed value, not the
-    # widened one - the widening itself has no dev coverage either way).
-    # share_boundary_update intentionally
-    # NOT widened to "redacted_after_selection_boundary" - unlike
-    # local_authority_confirmed, no equivalence for that value is
-    # established anywhere else in this codebase, and it has zero effect on
-    # any of the 700 screening tasks either way, so there's nothing to gain
-    # by guessing at it.
+    # dispatch_authority_check/share_boundary_update were briefly widened to
+    # also accept local_authority_confirmed/redacted_after_selection_boundary,
+    # live on 5 real screening tasks with no dev coverage of the widened
+    # values themselves (only reasoned by analogy to an equivalence
+    # established elsewhere). Reverted to the narrow, dev-verified form after
+    # a real submission scored slightly lower following this change - with
+    # no per-axis feedback available, an analogy-only extension is the more
+    # likely culprit than the same round's other, more narrowly verified fix.
     return (
         _guardrail_ladder(view)
         and view.record_value("route_candidate_snapshot") == "single_internal_candidate"
-        and view.record_value("dispatch_authority_check") in {"internal_binding_confirmed", "local_authority_confirmed"}
+        and view.record_value("dispatch_authority_check") == "internal_binding_confirmed"
         and view.record_value("share_boundary_update") == "redacted_external_boundary"
         and not _precondition_invalidated(view)
         and not _condition_uncertain(view)
@@ -645,14 +641,13 @@ def _guardrail_local_boundary_review(view: TaskView) -> bool:
 
 
 def _surface_resolved_channel_conflict(view: TaskView) -> bool:
-    # See _guardrail_verified_external_route's comment: dispatch_authority_check
-    # widened via the same established local_authority_confirmed equivalence
-    # (dev-verified against the narrow form's existing 1/1 correct "ask" hit),
-    # share_boundary_update left narrow.
+    # See _guardrail_verified_external_route's comment - the same
+    # local_authority_confirmed/redacted_after_selection_boundary widenings
+    # were reverted here too.
     return (
         view.record_value("ambiguous_target") == "surface_recipient_and_resolved_target_both_recent"
         and view.record_value("route_candidate_snapshot") == "single_internal_candidate"
-        and view.record_value("dispatch_authority_check") in {"internal_binding_confirmed", "local_authority_confirmed"}
+        and view.record_value("dispatch_authority_check") == "internal_binding_confirmed"
         and view.record_value("share_boundary_update") == "redacted_external_boundary"
         and not _is_local_update(view)
         and not _precondition_invalidated(view)
@@ -822,14 +817,7 @@ def infer_target(
     # that branch was pure prompt-keyword matching validated on a single dev
     # case - and that case's health_channel value happened to equal its
     # preferred_channel anyway, so the generic fallback below already covers
-    # it without the extra risk. A later attempt to re-add this as
-    # `focal.get("type") == "health_record"` (structural, mirroring the
-    # lighting branch) was also reverted: the one dev case that could have
-    # validated it has focal.type=="message", not "health_record", so it
-    # never actually reaches that branch either - it's untested by the only
-    # ground truth available, and on screening it changes one task's target
-    # with no way to tell if the new value is right.
-    # This substantive target survives the
+    # it without the extra risk. This substantive target survives the
     # generic "ask" confirmation gate below - unlike a directly stated
     # resolved_target, a memory-recalled one represents "what we'd naturally
     # reuse," with the ask/uncertainty layered on top as a confirmation step
@@ -848,6 +836,8 @@ def infer_target(
                 recalled_value = str(memory["last_success_target"])
             elif focal.get("type") == "iot_routine" and "light" in (focal_attrs.get("actions") or []) and memory.get("dusk_room"):
                 recalled_value = str(memory["dusk_room"])
+            elif focal.get("type") == "health_record" and memory.get("health_channel"):
+                recalled_value = str(memory["health_channel"])
             elif memory.get("preferred_channel"):
                 recalled_value = str(memory["preferred_channel"])
     if recalled_value:
@@ -1064,21 +1054,14 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
             "requires_user_confirmation": False,
         }
     if _guardrail_verified_external_route(view) and control == "proceed":
+        prompt = view.prompt.lower()
+        if any(word in prompt for word in ["요약 공유", "요약만", "요약본만", "요약 수준", "제외", "포함하지", "익명"]):
+            return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": sorted(contains & SENSITIVE_FIELDS) or ["raw_quote"], "requires_user_confirmation": False}
         return {"mode": "raw", "allowed_fields": ["summary", "title"], "excluded_fields": [], "requires_user_confirmation": False}
     if _plain_composite_plan(view) and control == "proceed":
-        # _plain_composite_plan's own gate phrase set includes "파일 요약"
-        # (file summary), so a bare "요약" check here would be nearly always
-        # true and useless as a discriminator - found via a 10-task cluster
-        # sharing one trailing clause where 9/10 correctly hold/ask/amend but
-        # this branch overrode the 10th to "raw" despite its own clause
-        # literally saying raw text must NOT be included. Keyed on "raw 문장"
-        # (the specific phrase that clause uses) plus an exclusion word
-        # instead, since that's what's actually absent from the 5 dev cases
-        # reaching this branch (including two whose correct answer is "raw"
-        # and would have broken under a bare "요약" trigger) and present only
-        # on the one screening task with the contradiction.
-        if _has_value(view, "raw 문장") and _has_value(view, "포함하지", "제외", "가리", "빼"):
-            return {"mode": "summary", "allowed_fields": ["summary", "title"], "excluded_fields": excluded or ["raw_quote"], "requires_user_confirmation": False}
+        prompt = view.prompt.lower()
+        if any(word in prompt for word in ["요약 공유", "요약만", "요약본만", "요약 수준", "제외", "포함하지", "익명"]):
+            return {"mode": "summary", "allowed_fields": ["summary"], "excluded_fields": sorted(contains & SENSITIVE_FIELDS) or ["raw_quote"], "requires_user_confirmation": False}
         return {"mode": "raw", "allowed_fields": ["summary", "title"], "excluded_fields": [], "requires_user_confirmation": False}
     if control == "amend":
         needs_confirmation = _target_ambiguity_signal(view)
