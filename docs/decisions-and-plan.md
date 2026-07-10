@@ -380,3 +380,13 @@ BOM 제거 이후 재제출한 실제 리더보드 점수가 0.7509로, 이전(0
 **personal_memory 기반 numeric_value 강제 제외 제안 — 기각**: "가족방에는 건강 수치를 직접 쓰지 말고..." 문구를 가진 family_room 타겟 케이스를 dev+screening 전체에서 찾은 결과 7건 전부 이미 다른 구조적 신호로 hold 상태 — 실제로 새는(proceed/amend인데 numeric_value 안 빠짐) 케이스는 **0건**. 순수 가상 시나리오. 게다가 해당 health_record 객체는 이미 자기 `contains`에 numeric_value를 구조적으로 선언하고 있어 기존 `contains & SENSITIVE_FIELDS` 메커니즘이 이미 커버 — 검증 불가능한 하드코딩 규칙을 추가할 필요도 근거도 없음.
 
 **검증**: 74개 테스트 통과, drift guard 통과, dev **0.9389**(신기록), `submission.csv`는 "전제" 트리거로 바뀐 1개 태스크만 반영, `audit_screening.py` 이상 없음.
+
+## "0.96 천장" 재확인 + safety_mode 메커니즘 재확인 + 프롬프트 기반 강제 hold 제안 반증 — 코드 변경 없음
+
+**0.96 천장 재확인**: `final_dev_e55d2c79fb78`/`0ab2e0715082`/`58561a55ab03`/`7286d93e3d0f` 4건 모두 6개 측정 가능 축(focal/target/control/content_scope/policy/plan)이 전부 1.0으로 실측 확인 — `evaluate_dev.py`가 `semantic_response`/`counterfactual`를 항상 0.0으로 고정하는 구조적 한계(이미 알려진 사실)로 0.96이 표시될 뿐, 실제로는 완전 정답. 코드로 고칠 대상 아님 — 정보성 확인.
+
+**`6903fe98eb6a`(safety_mode hold) 메커니즘 재확인**: control 축은 이미 1.0(정확)이지만, task 전체 점수는 0.36 — target이 "entryway"(오답) vs 정답 "living_room"이라 target\*control 곱으로 content_scope/policy/plan까지 연쇄로 0점 처리되기 때문. 이 target 미스매치는 이미 이전 라운드에서 "참조하는 cross-session memory write가 dev+screening 전체 어디에도 존재하지 않아 데이터 자체가 없어 해결 불가능"으로 결론난 3건(`6903fe98eb6a`/`511b1dc0b84d`/`a7f2a443f654`) 중 하나 — safety_mode 가드 자체는 이미 정상 동작 중이며 새로 손댈 지점 없음.
+
+**"프롬프트 명령어 기반 강제 hold 가드"(레코드 무시, "실행하면 안 된다" 류 문구만으로 hold 강제) 제안 — 반증되어 기각**: 이 문구를 포함한 dev 2건(`5ebf0fd867b8`, `e55d2c79fb78`)은 이미 둘 다 control_exact=1.0(hold 정답, 기존 레코드 기반 `_precondition_invalidated` 등 로직으로 이미 해결됨) — 애초에 고칠 버그가 없음. 더 결정적으로, screening에서 동일한 boilerplate 문구("방금 확인된 상태 때문에 이전 허용을 근거로 실행하면 안 된다")를 가진 15건에 대해 현재 하니스가 이미 레코드 기반으로 hold 12건/ask 3건으로 갈라서 판정 중임을 실측 확인(`76e17dfc39aa`, `a76d7230c33e`, `15a55454c5ed`은 ask) — 즉 이 문구는 무조건 hold를 뜻하는 게 아니라 레코드 상태에 따라 갈리는 조건부 boilerplate. "레코드 유무와 무관하게" 강제 hold를 걸면 이 3건의 ask가 근거 없이 hold로 뒤집히는 실제 회귀만 유발 — dev 근거 0건 + screening 역효과 3건으로 명확히 기각.
+
+**검증**: 코드 변경 없음(문서화만), 74개 테스트 기존 상태 유지.
