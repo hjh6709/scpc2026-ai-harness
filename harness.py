@@ -244,20 +244,29 @@ def choose_focal(view: TaskView) -> dict[str, Any]:
                 return by_id[candidate]
 
     history = view.history_text
-    refs = re.findall(r"WM-\d+", history)
+    # ref codes were assumed to always look like "WM-123" - every dev+screening
+    # task does use that format, but nothing in TERMS_GUIDE.md/submission_schema.json
+    # documents it as fixed, so a differently-formatted ref_code in unseen data
+    # would silently skip this entire block. Building the pattern from this
+    # task's own object_by_ref() keys instead removes that assumption while
+    # matching byte-for-byte on every task that does use "WM-\d+", since those
+    # ref codes are exactly what by_ref's keys already are.
+    ref_codes = list(by_ref.keys())
+    ref_pattern = "|".join(re.escape(code) for code in ref_codes) if ref_codes else None
+    refs = re.findall(ref_pattern, history) if ref_pattern else []
     if refs:
         unique_refs = list(dict.fromkeys(refs))
 
-        pass_match = re.search(r"(WM-\d+)\s*(?:만|only)\s*(?:통과|pass)", history)
+        pass_match = re.search(rf"({ref_pattern})\s*(?:만|only)\s*(?:통과|pass)", history)
         if pass_match and pass_match.group(1) in by_ref:
             return by_ref[pass_match.group(1)]
-        fixed_match = re.search(r"(WM-\d+)\s*(?:로|으로)?\s*고정", history)
+        fixed_match = re.search(rf"({ref_pattern})\s*(?:로|으로)?\s*고정", history)
         if fixed_match and fixed_match.group(1) in by_ref:
             return by_ref[fixed_match.group(1)]
-        stated_match = re.search(r"참조는\s*(WM-\d+)(?:이다|다)", history)
+        stated_match = re.search(rf"참조는\s*({ref_pattern})(?:이다|다)", history)
         if stated_match and stated_match.group(1) in by_ref:
             return by_ref[stated_match.group(1)]
-        binding_match = re.search(r"binding[은는]\s*(WM-\d+)[을를]\s*현재\s*턴의\s*참조로\s*지정", history)
+        binding_match = re.search(rf"binding[은는]\s*({ref_pattern})[을를]\s*현재\s*턴의\s*참조로\s*지정", history)
         if binding_match and binding_match.group(1) in by_ref:
             return by_ref[binding_match.group(1)]
 
@@ -330,7 +339,18 @@ def _has_value(view: TaskView, *needles: str) -> bool:
         + " " + view.history_text.lower()
         + " " + view.personal_memory_text.lower()
     )
-    return any(needle.lower() in values for needle in needles)
+    # Stripped-whitespace fallback: catches spacing variants of a multi-word
+    # phrase (e.g. "보내지말고" for "보내지 말고") that unseen data could use.
+    # Doesn't help with particle insertion ("전달 대신" vs "전달은대신") - that
+    # would need real morphological handling, not just whitespace collapsing.
+    # Checked against every _has_value call actually made across all 820
+    # dev+screening tasks: this normalization changes zero outcomes there, so
+    # it's a pure hedge against unseen spacing variation, not a live behavior
+    # change on data we can verify.
+    if any(needle.lower() in values for needle in needles):
+        return True
+    values_compact = re.sub(r"\s+", "", values)
+    return any(re.sub(r"\s+", "", needle.lower()) in values_compact for needle in needles)
 
 
 def _precondition_invalidated(view: TaskView) -> bool:
@@ -1253,6 +1273,26 @@ def _require_task_id(task: dict[str, Any]) -> str:
     return str(task_id)
 
 
+def _fallback_answer() -> dict[str, Any]:
+    # One unseen-schema surprise in answer_task must not sink the whole
+    # submission - a single uncaught exception here would previously abort
+    # run_harness entirely, losing every remaining task's answer. This is a
+    # deliberately conservative "ask" answer (satisfies validate_answer_
+    # consistency's ask-control rules) used only when the real harness logic
+    # raises, not a normal code path.
+    return {
+        "focal_id": "",
+        "target": "user",
+        "control": "ask",
+        "content_scope": {"mode": "none", "allowed_fields": [], "excluded_fields": [], "requires_user_confirmation": True},
+        "policy": {"risk_flags": ["clarification_required"], "violations": [], "requires_confirmation": True},
+        "plan_events": [{"verb": "clarify", "target": "user", "args": {"reason": "clarification_required"}}],
+        "user_response": "대상이나 허용 범위를 한 번 더 확인해야 합니다.",
+        "audit_tags": ["clarification_required"],
+        "counterfactual": "최신 기록, 동의 상태, 공유 범위, 보안 신호가 바뀌면 판단이 달라질 수 있습니다.",
+    }
+
+
 def run_harness(tasks: list[dict[str, Any]], harness_cls: type = FinalHarness, *, harness_name: str = "scpc_rule_harness") -> dict[str, Any]:
     ordered = sorted(tasks, key=lambda t: (str(t.get("session_id", "")), _safe_turn_index(t.get("turn_index")), _require_task_id(t)))
     harness = harness_cls()
@@ -1261,7 +1301,11 @@ def run_harness(tasks: list[dict[str, Any]], harness_cls: type = FinalHarness, *
     for task in ordered:
         sid = str(task.get("session_id", ""))
         session = sessions.setdefault(sid, {})
-        answers[_require_task_id(task)] = submission_answer(answer_one(harness, task, session))
+        try:
+            answer = answer_one(harness, task, session)
+        except Exception:
+            answer = _fallback_answer()
+        answers[_require_task_id(task)] = submission_answer(answer)
     payload = {
         "schema": SUBMISSION_SCHEMA,
         "meta": {

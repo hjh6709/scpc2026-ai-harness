@@ -260,3 +260,14 @@ dev 전체: 0.9389 → **0.9444** (control 축 100%, focal 100%, target 97.5%, c
 - `validate_payload`(우리 harness.py 버전)이 baseline보다 더 엄격(`seed==42`, `temperature==0.0`, `user_response`/`audit_tags`/`counterfactual` 필수 등 추가 검증) — 우리가 항상 그 조건을 만족하는 값을 생성하므로 실제로 막힌 적은 없음, 문제 아님.
 
 **검증**: 74개 테스트 통과, drift guard 통과, dev 0.9384 유지(personal_memory 추가는 dev에 영향 없음이 사전 확인대로 재현됨), `submission.csv` 재생성, `audit_screening.py` 재확인 이상 없음.
+
+## 외부 리뷰 4건 검증 — 신뢰성/일반화 개선 3건 적용, 1건은 이미 해당 없음 확인
+
+사용자가 외부에서 받은 리뷰(4개 제안)를 코드와 대조 검증하라고 요청. 각각 실제 코드를 열어 근거를 확인한 뒤 적용/기각을 판단함.
+
+1. **`run_harness`에 태스크 단위 예외 처리 없음 — 채택**: 실제로 `for task in ordered: ... answer_one(harness, task, session) ...`에 try/except가 전혀 없어서, 태스크 하나가 unseen 스키마(예: `attrs`가 list로 옴)로 예외를 던지면 **전체 제출이 중단**됨. `_fallback_answer()`를 추가해 예외 발생 시 `validate_answer_consistency`의 `ask` 규칙을 만족하는 안전한 기본 답안으로 대체하도록 수정. 직접 예외를 던지는 가짜 harness로 시뮬레이션: 크래시 태스크는 fallback으로, 앞뒤 태스크는 정상 처리됨을 확인, `validate_payload` 통과 확인.
+2. **`choose_focal`의 `WM-\d+` 하드코딩 — 채택**: focal 후보가 여러 개일 때 쓰는 5개 정규식(최상위 `refs` 추출 + `pass_match`/`fixed_match`/`stated_match`/`binding_match`) 전부가 "WM-숫자" 포맷을 가정하고 있었음. 이 포맷이 dev+screening 820개 전체에서 100% 일관되지만 스펙 문서 어디에도 고정 포맷으로 명시된 적은 없음. `re.findall(r"WM-\d+", ...)` 대신 이 태스크의 실제 `object_by_ref()` 키(그 태스크에 진짜 존재하는 ref_code들)로 동적 정규식을 만들도록 교체 — 리뷰어의 원안은 순서 보존이 깨지는 버그가 있어서(`object_by_ref().keys()`를 텍스트 등장 순서가 아니라 object 목록 순서로 씀) 직접 구현을 다시 짬. 교체 전/후로 screening 700개 전체의 `choose_focal` 출력을 직접 diff — **0건 변경**(현재 데이터에서 완전히 동일하게 동작하면서 포맷 가정만 제거됨).
+3. **한국어 띄어쓰기 변형 매칭 — 채택(공백만)**: `_has_value`에 공백 제거 폴백 추가. 먼저 안전성부터 확인 — dev+screening 820개 전체에서 실제로 호출되는 모든 `_has_value(...)` 조합을 원래 방식과 공백-제거 방식으로 나란히 비교한 결과 **차이 0건**(현재 데이터에는 이 정규화가 새로 매치를 만들거나 깨는 사례가 전혀 없음 - 순수하게 hidden 데이터를 위한 안전장치). 단, 리뷰어가 예시로 든 "전달 대신" vs "전달은대신"은 공백이 아니라 조사 삽입이라 이 방식으로는 안 잡힘 — 조사 변형까지 다루려면 형태소 분석 수준의 훨씬 위험한 접근이 필요해서 범위에서 제외.
+4. **`FixedSLMClient`의 `sensitive_content` 텍스트 매칭 — 기각(해당 없음)**: 리뷰가 지적한 evidence의 텍스트 기반 `sensitive_content` 플래그는 `build_policy` 963번째 줄에서 **즉시 버려지고**, 1040번째 줄에서 `contained_fields(focal) & SENSITIVE_FIELDS`(focal object의 실제 구조적 attrs)로 다시 계산됨을 코드로 재확인. `"resident_number"`/`"social_id"` 같은 새 단어가 텍스트에 나와도 이미 구조적 필드 목록으로 판단하고 있어서 리뷰가 지적한 경로 자체가 죽어있는 코드임.
+
+**검증**: 74개 테스트 통과, drift guard 통과, dev 0.9384 유지(세 변경 모두 현재 데이터에서 무변화, hidden 데이터 대비 안전장치), `submission.csv` 재생성, `audit_screening.py` 재확인 이상 없음.
