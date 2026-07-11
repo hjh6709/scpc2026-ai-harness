@@ -402,3 +402,20 @@ BOM 제거 이후 재제출한 실제 리더보드 점수가 0.7509로, 이전(0
 **제안 3(`user_response`의 target="user"/"memory_store" 자연어 치환) — 최초 기각 사유가 틀렸음을 사용자 지적으로 정정, 이후 별도 검토**: 최초에 "baseline 노트북의 `user_response`가 공식 레퍼런스라 이미 그것과 동일하니 안 고쳐도 된다"고 기각했으나, 이는 잘못된 근거였음을 사용자가 지적해 재확인함. baseline 노트북 0번 셀에 "이 baseline은 제출 형식과 코드 구조를 보여주는 **약한 예시**입니다... 아래 코드는 **일부러 약하게 작성된 starter**입니다"라고 명시돼 있어, `FinalHarness.user_response`는 채점 정답이 아니라 참가자가 개선하도록 의도적으로 미완성으로 남겨둔 starter 코드임을 확인 — "공식 레퍼런스"라고 부른 것 자체가 과장된 표현이었음. 추가로 `dev_answers.json`의 답안 스키마에는 애초에 `user_response`/`counterfactual` 필드가 존재하지 않음(키: `focal_id/target/control/content_scope/policy/expected_events`뿐)도 확인 — 이 필드는 로컬에 검증 가능한 정답 자체가 없어, 다른 3개 주장(전부 dev/screening 데이터로 참/거짓을 확정할 수 있었음)과 근본적으로 다른 범주. 즉 "baseline과 같아서 맞다"도, 반대로 "제안대로 고치면 더 낫다"도 로컬에서는 증명 불가능 — 이 항목만은 검증이 아니라 판단의 문제로 남음.
 
 **검증**: 코드 변경 없음(4개 주장 모두 실측으로 반증/기각), 74개 테스트 기존 상태 유지, dev 0.9389 그대로.
+
+## `user_response` 자연어 치환 채택 + 기각 항목 7건 전량 재검증(재현 확인) + 리터럴 매칭 전수 감사 완료
+
+**`user_response` target="user"/"memory_store" 자연어 치환 — 채택**: 위 라운드에서 정정한 대로, 이 필드는 채점되는 6개 축을 전혀 안 건드리고 로컬 검증 정답도 없어 다운사이드가 없음 — `USER_RESPONSE_TARGET_PHRASES = {"user": "사용자", "memory_store": "기기 내 메모리"}`로 치환. 74개 테스트 통과, dev 0.9389 그대로(예상대로 무변화), submission.csv 재생성.
+
+**기각 항목 7건 전량 코드 재실행으로 재검증 — 전부 원래 수치와 정확히 재현**:
+1. `_precondition_invalidated`에 "우선한다" 추가 → dev control mismatch 1→**36**/120
+2. "보류 후보로 남겼고" → dev 14건(screening 0), 그 중 hold 3 / proceed 8
+3. personal_memory 건강수치+family_room+health_record 시나리오 → dev+screening 전체에서 leak 케이스 **0건**
+4. focal "마지막/최근/방금/끝에/직전" 폴백 → dev 28건 트리거, help 7 / **break 21**, screening 392/700(56%) 등장
+5. 동적 excluded_fields 파싱 → dev 68건 트리거, 그 중 **55건**(81%)이 정답에 없는 필드 추가
+6. "실행하면 안 된다" 무조건 hold → screening 15건 hold 12/**ask 3**(레코드 기반으로 이미 정확히 구분 중)
+7. "26개 연습용 태스크" 주장 → dev_tasks 120 = dev_answers 120, 정답 없는 태스크 **0건**
+
+**harness.py 전체 리터럴 매칭 전수 감사(build_policy/build_plan_events 포함, 확장 정규식으로 재스캔)**: 이전 라운드에서 놓쳤던 매칭 패턴(`"단어" in values` 등)까지 포함해 8개 신규 후보 발견 — `취소`(dev 8/screening 0)는 `_precondition_invalidated` 등 이미 넓은 구조적 신호와 OR로 묶여 dev 8건 전부 다른 신호가 이미 True(단독 결정 사례 0건, 직접 실행 확인)이라 무해. `모호`/`외부`/`임시 알림`/`확인`은 screening recurrence 충분(192~521회). `피싱`은 dev/screening 0/0이지만 같은 줄의 `"phishing" in values`(구조적 record 값) + `types & {"security_alert","safety_mode"}`가 이미 커버해 죽은 코드. **build_plan_events는 자유텍스트 매칭이 전혀 없어(순수 구조적 값 기반) 리스크 없음.** 결론: 이전에 찾은 `build_content_scope` line 1031 `"표면 문장만"`(dev 근거 1건뿐이라 원천적으로 검증 불가능한 영역, 제거하면 dev 유일 정답만 깨지고 screening 9건은 이미 fallback이라 무변화) 외에 harness.py 전체에서 다른 실제 위험 지점은 발견되지 않음.
+
+**검증**: 74개 테스트 통과, dev 0.9389, submission.csv는 `user_response` 텍스트만 변경(채점 축 무변화).

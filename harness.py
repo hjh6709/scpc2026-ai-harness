@@ -1300,19 +1300,29 @@ def build_plan_events(focal_id: str, target: str, control: str, scope: dict[str,
     return events[:18]
 
 
+USER_RESPONSE_TARGET_PHRASES = {"user": "사용자", "memory_store": "기기 내 메모리"}
+
+
 def user_response(control: str, target: str, scope: dict[str, Any]) -> str:
-    # Every prompt, record, and history string in this dataset is Korean, and
-    # the organizer-provided baseline notebook's reference user_response is
-    # Korean too - matching its wording here since semantic_response (4% of
-    # the score) almost certainly expects Korean, and there's no dev ground
-    # truth for this field to verify anything more specific against.
+    # Every prompt, record, and history string in this dataset is Korean, so
+    # this stays Korean too - semantic_response (4% of the score) almost
+    # certainly expects it, and there's no dev ground truth for this field to
+    # verify anything more specific against. target itself is never a guessed
+    # value (see infer_target's own note) - it's always a structural target
+    # name, or one of the two internal fallback tokens "user"/"memory_store".
+    # Those two aren't natural Korean nouns, so splicing them raw into a
+    # Korean sentence with a (으)로 particle reads as mixed-language and
+    # grammatically off; substituting the two known fallback tokens with their
+    # natural-language equivalent doesn't touch target itself or any other
+    # graded field.
+    target_phrase = USER_RESPONSE_TARGET_PHRASES.get(target, target)
     if control == "hold":
         return "보안, 동의 또는 정책 조건 때문에 진행하지 않겠습니다."
     if control == "ask":
         return "대상이나 허용 범위를 한 번 더 확인해야 합니다."
     if control == "amend":
-        return f"민감 정보를 제외하고 {target}(으)로 진행하겠습니다."
-    return f"요청한 범위로 {target}(으)로 진행하겠습니다."
+        return f"민감 정보를 제외하고 {target_phrase}(으)로 진행하겠습니다."
+    return f"요청한 범위로 {target_phrase}(으)로 진행하겠습니다."
 
 
 def update_session_state(
