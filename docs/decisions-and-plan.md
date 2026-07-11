@@ -419,3 +419,11 @@ BOM 제거 이후 재제출한 실제 리더보드 점수가 0.7509로, 이전(0
 **harness.py 전체 리터럴 매칭 전수 감사(build_policy/build_plan_events 포함, 확장 정규식으로 재스캔)**: 이전 라운드에서 놓쳤던 매칭 패턴(`"단어" in values` 등)까지 포함해 8개 신규 후보 발견 — `취소`(dev 8/screening 0)는 `_precondition_invalidated` 등 이미 넓은 구조적 신호와 OR로 묶여 dev 8건 전부 다른 신호가 이미 True(단독 결정 사례 0건, 직접 실행 확인)이라 무해. `모호`/`외부`/`임시 알림`/`확인`은 screening recurrence 충분(192~521회). `피싱`은 dev/screening 0/0이지만 같은 줄의 `"phishing" in values`(구조적 record 값) + `types & {"security_alert","safety_mode"}`가 이미 커버해 죽은 코드. **build_plan_events는 자유텍스트 매칭이 전혀 없어(순수 구조적 값 기반) 리스크 없음.** 결론: 이전에 찾은 `build_content_scope` line 1031 `"표면 문장만"`(dev 근거 1건뿐이라 원천적으로 검증 불가능한 영역, 제거하면 dev 유일 정답만 깨지고 screening 9건은 이미 fallback이라 무변화) 외에 harness.py 전체에서 다른 실제 위험 지점은 발견되지 않음.
 
 **검증**: 74개 테스트 통과, dev 0.9389, submission.csv는 `user_response` 텍스트만 변경(채점 축 무변화).
+
+## 라벨 없이도 버그를 잡는 "순서 불변성" 검증 추가 — `audit_screening.py`에 정식 편입
+
+**배경**: "evaluate_dev.py 자체를 더 세게 만들어라"는 요청을 정확히 풀어보면, 채점 스크립트를 바꾸는 건 측정 도구만 바꾸는 거라 실제 제출 점수엔 영향이 없음(이미 baseline과 동일한 공식 채점 근사치라 건드릴 이유도 없음) — 대신 dev_answers.json 120개 라벨이 못 잡는 종류의 버그를 **라벨 없이도** 잡는 더 엄격한 검증을 harness.py 자체에 대해 추가하는 게 실질적으로 맞는 방향.
+
+**`order_invariance_check` 추가(`audit_screening.py`)**: `device_state.objects`/`records`는 순서가 의미를 갖지 않는 집합 데이터인데, `choose_focal`의 fallback 스코어링(동점 시 첫 항목 우선) 등 순서에 우연히 의존하는 로직이 있다면 셔플했을 때 결정(`focal_id`/`target`/`control`)이 바뀔 수 있음 — 이건 정답을 몰라도 "확실한 버그"로 잡을 수 있는 불변성. 세션 내 모든 태스크의 `objects`/`records`를 각각 셔플해서 재실행하고 baseline과 비교하는 방식으로 구현, dev+screening 820개 전체에 대해 실행: **0/820건에서 순서 변화로 답이 바뀜 확인** — choose_focal의 ref-code/marker/ordinal 매칭이 실제로 순서에 안전하다는 걸 라벨 없이 직접 실증. `audit_screening.py`의 정식 섹션으로 편입해 앞으로 제출 전마다 재실행 가능.
+
+**검증**: 74개 테스트 통과, `audit_screening.py --tasks screening_tasks.jsonl --dev-tasks dev_tasks.jsonl` 재실행 시 order invariance 섹션 포함 전부 클린.

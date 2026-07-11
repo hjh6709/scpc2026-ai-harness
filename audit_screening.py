@@ -16,6 +16,11 @@ show directly:
      set but never appear in dev_tasks.jsonl for that same type. Any code path
      that does exact-string matching against a fixed value list will silently
      skip these.
+  4. Order invariance - shuffles device_state.objects/records within every
+     task and checks focal/target/control don't change. Doesn't need
+     reference answers: an order-dependent flip is a bug on unlabeled data
+     too, since objects/records are unordered set data, not a sequence whose
+     order carries meaning.
 
 None of this tells you whether an answer is *correct* - there is no reference
 for screening. It only tells you where the harness's own logic might be
@@ -206,6 +211,56 @@ def unrecognized_object_fields(tasks: list[dict[str, Any]], dev_tasks: list[dict
     return rows
 
 
+def order_invariance_check(tasks: list[dict[str, Any]], seed: int = 42) -> list[tuple[str, str]]:
+    """Shuffles device_state.objects/records within every task and replays the
+    same sessions, comparing (focal_id, target, control) before and after.
+
+    No reference answers are needed for this - the invariant is that shuffling
+    a list the harness is supposed to treat as unordered set data (not a
+    meaningfully-sequenced narrative) shouldn't change the decision. A flip
+    here is a genuine order-dependence bug regardless of what the "correct"
+    answer is, catchable on labeled or unlabeled data alike."""
+    import copy
+    import random
+
+    rng = random.Random(seed)
+
+    def sessions_sorted(dataset: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        by_sess: dict[str, list[dict[str, Any]]] = {}
+        for t in dataset:
+            by_sess.setdefault(str(t.get("session_id", "")), []).append(t)
+        for sess in by_sess.values():
+            sess.sort(key=lambda t: int(t.get("turn_index", 0)))
+        return by_sess
+
+    def shuffled(task: dict[str, Any], key: str) -> dict[str, Any]:
+        mutated = copy.deepcopy(task)
+        items = ((mutated.get("device_state") or {}).get(key) or [])
+        if len(items) >= 2:
+            rng.shuffle(items)
+        return mutated
+
+    by_sess = sessions_sorted(tasks)
+    flips: list[tuple[str, str]] = []
+    for sess_tasks in by_sess.values():
+        baseline_harness = FinalHarness()
+        baseline_session: dict[str, Any] = {}
+        baseline: dict[str, dict[str, Any]] = {}
+        for t in sess_tasks:
+            baseline[str(t["id"])] = baseline_harness.answer_task(t, baseline_session)
+        for key in ("objects", "records"):
+            mutated_harness = FinalHarness()
+            mutated_session: dict[str, Any] = {}
+            for t in sess_tasks:
+                answer = mutated_harness.answer_task(shuffled(t, key), mutated_session)
+                base = baseline[str(t["id"])]
+                if (answer.get("focal_id"), answer.get("target"), answer.get("control")) != (
+                    base.get("focal_id"), base.get("target"), base.get("control")
+                ):
+                    flips.append((str(t["id"]), key))
+    return flips
+
+
 def exception_sweep(tasks: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """Run every task through the harness in session/turn order, one at a time,
     and collect (task_id, error) for every exception - instead of run_harness's
@@ -272,6 +327,15 @@ def main() -> None:
         print("  none - every task produced an answer without raising")
 
     payload = run_harness(tasks, harness_name="audit")
+
+    print("\n=== Order invariance (objects/records shuffled, focal/target/control compared) ===")
+    flips = order_invariance_check(tasks)
+    if flips:
+        print(f"  {len(flips)} flip(s) - order-dependent decision found:")
+        for task_id, key in flips[:20]:
+            print(f"    {task_id}: shuffling {key} changed the answer")
+    else:
+        print(f"  none - all {len(tasks)} tasks produce the same focal/target/control regardless of objects/records order")
 
     print("\n=== Answer shape invariants (full sweep, not a sample) ===")
     problems = shape_invariants(payload)
