@@ -396,20 +396,69 @@ def score_answer(pred: dict[str, Any], ref: dict[str, Any]) -> dict[str, Any]:
     return {"score": weighted, "axes": axes}
 
 
+def canonical_reference_answer(ref: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "focal_id": ref.get("focal_id"),
+        "target": ref.get("target"),
+        "control": ref.get("control"),
+        "content_scope": ref.get("content_scope"),
+        "policy": ref.get("policy"),
+        "plan_events": ref.get("expected_events", ref.get("plan_events", [])),
+    }
+
+
+def exact_field_diagnostics(pred: dict[str, Any], ref: dict[str, Any]) -> dict[str, float]:
+    canonical_ref = canonical_reference_answer(ref)
+    return {
+        "canonical_answer_exact": float(pred == canonical_ref),
+        "core_key_set_exact": float(set(pred) == set(canonical_ref)),
+        "focal_exact": float(pred.get("focal_id") == canonical_ref.get("focal_id")),
+        "target_exact": float(pred.get("target") == canonical_ref.get("target")),
+        "control_exact": float(pred.get("control") == canonical_ref.get("control")),
+        "content_scope_exact": float(pred.get("content_scope") == canonical_ref.get("content_scope")),
+        "policy_exact": float(pred.get("policy") == canonical_ref.get("policy")),
+        "plan_events_exact": float(pred.get("plan_events") == canonical_ref.get("plan_events")),
+    }
+
+
+def score_answer_exact(pred: dict[str, Any], ref: dict[str, Any]) -> dict[str, Any]:
+    exact = exact_field_diagnostics(pred, ref)
+    axes = {
+        "focal": exact["focal_exact"],
+        "target": exact["focal_exact"] * exact["target_exact"],
+        "control": exact["focal_exact"] * exact["control_exact"],
+        "semantic_response": 0.0,
+        "counterfactual": 0.0,
+    }
+    dependent = axes["target"] * axes["control"]
+    axes["content_scope"] = dependent * exact["content_scope_exact"]
+    axes["policy"] = dependent * exact["policy_exact"]
+    axes["plan"] = dependent * exact["plan_events_exact"]
+    weighted = sum(axes[key] * WEIGHTS[key] for key in WEIGHTS)
+    return {"score": weighted, "axes": axes}
+
+
 def score_dev_submission(payload: dict[str, Any], reference_payload: dict[str, Any]) -> dict[str, Any]:
     reference_answers = reference_payload.get("answers", {})
     validate_payload(payload, expected_ids=set(reference_answers))
     rows = []
+    exact_rows = []
     for task_id, ref in reference_answers.items():
         pred = payload["answers"].get(task_id, {})
         scored = score_answer(pred, ref)
         rows.append({"task_id": task_id, **scored})
+        exact_scored = score_answer_exact(pred, ref)
+        exact_rows.append({"task_id": task_id, **exact_scored})
     overall = sum(row["score"] for row in rows) / len(rows) if rows else 0.0
     axes = {key: sum(row["axes"][key] for row in rows) / len(rows) if rows else 0.0 for key in WEIGHTS}
+    exact_overall = sum(row["score"] for row in exact_rows) / len(exact_rows) if exact_rows else 0.0
+    exact_axes = {key: sum(row["axes"][key] for row in exact_rows) / len(exact_rows) if exact_rows else 0.0 for key in WEIGHTS}
     return {
         "overall": round(overall, 4),
         "n": len(rows),
         "axes": {key: round(value, 4) for key, value in axes.items()},
+        "strict_exact_overall": round(exact_overall, 4),
+        "strict_exact_axes": {key: round(value, 4) for key, value in exact_axes.items()},
         "rows": rows,
     }
 
@@ -457,6 +506,7 @@ def main() -> None:
 
     task_by_id = {str(task["id"]): task for task in tasks}
     legacy_totals: Counter[str] = Counter()
+    exact_totals: Counter[str] = Counter()
     weak_buckets: dict[str, list[float]] = defaultdict(list)
     mismatch_counts: Counter[str] = Counter()
     detailed_rows = []
@@ -468,6 +518,8 @@ def main() -> None:
         legacy = answer_score_legacy(pred, ref)
         for key, value in legacy.items():
             legacy_totals[key] += value
+        for key, value in exact_field_diagnostics(pred, ref).items():
+            exact_totals[key] += value
         if pred.get("focal_id") != ref.get("focal_id"):
             mismatch_counts["focal"] += 1
         if pred.get("target") != ref.get("target"):
@@ -482,6 +534,10 @@ def main() -> None:
         print("legacy_field_diagnostics:")
         for key in sorted(legacy_totals):
             print(f"  {key}: {legacy_totals[key] / len(tasks):.3f}")
+        print("strict_exact_diagnostics:")
+        print(f"  strict_exact_overall: {report['strict_exact_overall']:.4f}")
+        for key in sorted(exact_totals):
+            print(f"  {key}: {exact_totals[key] / len(tasks):.3f}")
 
     print("mismatch_counts:")
     for key, value in mismatch_counts.most_common():

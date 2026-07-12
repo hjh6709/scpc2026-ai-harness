@@ -1,6 +1,6 @@
 import unittest
 
-from evaluate_dev import score_dev_submission
+from evaluate_dev import exact_field_diagnostics, score_dev_submission
 
 
 def answer(
@@ -58,8 +58,17 @@ class DevScoringTests(unittest.TestCase):
         }
         report = score_dev_submission(payload, {"answers": {"task_1": ref}})
         self.assertEqual(report["overall"], 0.96)
+        self.assertEqual(report["strict_exact_overall"], 0.96)
         self.assertEqual(report["axes"]["focal"], 1.0)
         self.assertEqual(report["axes"]["plan"], 1.0)
+        self.assertEqual(report["strict_exact_axes"]["plan"], 1.0)
+        self.assertEqual(exact_field_diagnostics(pred, ref)["canonical_answer_exact"], 0.0)
+
+        minimal_pred = {
+            key: pred[key]
+            for key in ["focal_id", "target", "control", "content_scope", "policy", "plan_events"]
+        }
+        self.assertEqual(exact_field_diagnostics(minimal_pred, ref)["canonical_answer_exact"], 1.0)
 
     def test_scope_policy_and_plan_are_gated_by_target_and_control(self):
         pred = answer(target="wrong", control="proceed")

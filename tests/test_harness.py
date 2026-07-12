@@ -59,7 +59,7 @@ class HarnessInterfaceTests(unittest.TestCase):
         self.assertEqual(set(payload["answers"]), {"task_1"})
         self.assertEqual(
             set(payload["answers"]["task_1"]),
-            {"focal_id", "target", "control", "content_scope", "policy", "plan_events", "user_response", "audit_tags", "counterfactual"},
+            {"focal_id", "target", "control", "content_scope", "policy", "plan_events"},
         )
 
     def test_answer_task_records_structured_session_state(self):

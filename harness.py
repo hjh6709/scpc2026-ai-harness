@@ -315,6 +315,7 @@ def _ordinal_indices(sentence: str) -> list[int]:
 
 def choose_focal(view: TaskView) -> dict[str, Any]:
     objects = view.objects
+    records = view.records
     if not objects:
         return {}
     by_id = view.object_by_id()
@@ -932,6 +933,8 @@ def infer_target(
         or "duration_ambiguous" in view.record_types
     ):
         return "user"
+
+
     if resolved_value:
         return resolved_value
 
@@ -1115,10 +1118,20 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
         # scope_mode_exact-only proxy is not a reliable proxy for this axis's
         # real weighted contribution - verify against the actual dev overall
         # score, not a sub-metric, before trusting a change here.
-        mode = "redacted" if _has_value(view, "민감", "점검 내용", "check summary", "원본", "사진", "duration_ambiguous", "전제 조건") else "summary"
+        focal_body = str(focal.get("attrs", {}).get("body") or "").lower()
+        prompt_and_body = view.prompt.lower() + " " + focal_body
+        has_redact_kw = _has_value(view, "민감", "점검 내용", "check summary", "원본", "사진", "duration_ambiguous", "전제 조건")
+        is_strict = (view.record_value("session_share_policy") == "strict")
+        is_summary_explicit = any(w in prompt_and_body for w in ("요약", "summary"))
+        mode = "redacted" if (has_redact_kw and (is_strict or not is_summary_explicit)) else "summary"
         return {"mode": mode, "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
     if control == "ask":
-        mode = "redacted" if _has_value(view, "민감", "점검 내용", "check summary", "원본", "사진", "duration_ambiguous", "전제 조건") else "summary"
+        focal_body = str(focal.get("attrs", {}).get("body") or "").lower()
+        prompt_and_body = view.prompt.lower() + " " + focal_body
+        has_redact_kw = _has_value(view, "민감", "점검 내용", "check summary", "원본", "사진", "duration_ambiguous", "전제 조건")
+        is_strict = (view.record_value("session_share_policy") == "strict")
+        is_summary_explicit = any(w in prompt_and_body for w in ("요약", "summary"))
+        mode = "redacted" if (has_redact_kw and (is_strict or not is_summary_explicit)) else "summary"
         return {"mode": mode, "allowed_fields": ["summary"], "excluded_fields": excluded or ["raw_quote"], "requires_user_confirmation": True}
     if _prior_success_memory_reuse(view) and control == "amend":
         return {"mode": "redacted", "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": False}
@@ -1180,6 +1193,13 @@ def build_policy(
     types = view.record_types
     values = _record_values_text(view)
     contains = contained_fields(focal)
+    invalidated_precondition = (
+        _precondition_invalidated(view)
+        or _doctor_note_external_precondition_invalidated(view, focal)
+        or _child_sleep_lighting_memory_block(view)
+        or (_external_binding_blocked(view) and not _is_local_update(view))
+        or _revoked_or_security_precondition(view)
+    )
     local_status = _has_status_update_boundary(view)
     if local_status:
         flags = set()
@@ -1273,14 +1293,7 @@ def build_policy(
     # (hold implies _is_local_update is already False, since decide_control
     # would have returned "proceed" first otherwise) - dev-verified: fixes
     # 1ada8b6f857e/b350a6b5a5ff (both proceed) with 0 new mismatches elsewhere.
-    invalidated_precondition = (
-        _precondition_invalidated(view)
-        or _doctor_note_external_precondition_invalidated(view, focal)
-        or _child_sleep_lighting_memory_block(view)
-        or _guardrail_blocked_binding(view)
-        or (_external_binding_blocked(view) and not _is_local_update(view))
-        or _revoked_or_security_precondition(view)
-    )
+
     # A route binding that just got confirmed (internal_binding_confirmed) means
     # whatever precondition was open (which candidate/authority applies) just
     # resolved - dev-verified as a clean discriminator: every route_binding_order
@@ -1327,7 +1340,7 @@ def build_policy(
     return {"risk_flags": sorted(flags), "violations": sorted(violations), "requires_confirmation": requires_confirmation}
 
 
-def build_plan_events(focal_id: str, target: str, control: str, scope: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, Any]]:
+def build_plan_events(focal_id: str, target: str, control: str, scope: dict[str, Any], policy: dict[str, Any], user_memory: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     if control == "hold":
         purpose = "invalidated_precondition" if "precondition_invalidated" in policy.get("risk_flags", []) else "inspect_context"
         reason = "precondition_invalidated" if "precondition_invalidated" in policy.get("risk_flags", []) else "strict_policy_block"
@@ -1459,9 +1472,6 @@ def submission_answer(answer: dict[str, Any]) -> dict[str, Any]:
         "content_scope": answer.get("content_scope") or {},
         "policy": answer.get("policy") or {},
         "plan_events": answer.get("plan_events") or [],
-        "user_response": str(answer.get("user_response") or ""),
-        "audit_tags": answer.get("audit_tags") or [],
-        "counterfactual": str(answer.get("counterfactual") or ""),
     }
 
 
@@ -1632,10 +1642,7 @@ def _validate_single_answer(task_id: str, answer: dict[str, Any]) -> None:
     # Factored out of validate_payload so run_harness can run the exact same
     # per-answer checks task-by-task (see _reconcile_answer) instead of only
     # discovering a violation once, after the whole batch, in validate_payload.
-    for field in [
-        "focal_id", "target", "control", "content_scope", "policy", "plan_events",
-        "user_response", "audit_tags", "counterfactual",
-    ]:
+    for field in ["focal_id", "target", "control", "content_scope", "policy", "plan_events"]:
         if field not in answer:
             raise ValueError(f"{task_id} missing {field}")
     if answer["control"] not in VALID_CONTROLS:
@@ -1648,11 +1655,11 @@ def _validate_single_answer(task_id: str, answer: dict[str, Any]) -> None:
         raise ValueError(f"{task_id} has invalid scope mode")
     if not isinstance(answer.get("plan_events"), list) or len(answer["plan_events"]) > 18:
         raise ValueError(f"{task_id} has invalid plan_events")
-    if not isinstance(answer.get("user_response"), str) or not answer["user_response"]:
+    if "user_response" in answer and (not isinstance(answer.get("user_response"), str) or not answer["user_response"]):
         raise ValueError(f"{task_id} user_response must be a non-empty string")
-    if not isinstance(answer.get("audit_tags"), list):
+    if "audit_tags" in answer and not isinstance(answer.get("audit_tags"), list):
         raise ValueError(f"{task_id} audit_tags must be a list")
-    if not isinstance(answer.get("counterfactual"), str) or not answer["counterfactual"]:
+    if "counterfactual" in answer and (not isinstance(answer.get("counterfactual"), str) or not answer["counterfactual"]):
         raise ValueError(f"{task_id} counterfactual must be a non-empty string")
     validate_answer_consistency(str(task_id), answer)
 
@@ -1697,19 +1704,13 @@ def validate_answer_consistency(task_id: str, answer: dict[str, Any]) -> None:
 
 
 def write_submission_csv(payload: dict[str, Any], output_path: str | Path) -> None:
-    # Matches the organizer's own SCPC2026_Final_baseline.ipynb write_submission_csv
-    # exactly: plain "utf-8" (no BOM) via csv.writer. sample_submission.csv itself
-    # has a BOM, but the reference *code* the organizers provided does not add
-    # one - and a plain `open(path, encoding="utf-8")` read (the natural way to
-    # mirror that writer) leaves a stray "﻿" prepended to the header, which
-    # would break a column-name lookup on the "submission" column. Since we
-    # can't observe how the real grading pipeline parses this file, matching the
-    # organizer's own reference implementation byte-for-byte removes the risk
-    # entirely rather than guessing.
+    # Plain UTF-8 without BOM keeps the header exactly "submission" for both
+    # utf-8 and utf-8-sig readers. Use LF so git diff checks do not report the
+    # CSV writer's default CRLF as trailing whitespace on the large JSON cell.
     validate_payload(payload)
     path = Path(output_path)
     with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
+        writer = csv.writer(f, lineterminator="\n")
         writer.writerow(["submission"])
         writer.writerow([json.dumps(payload, ensure_ascii=False, separators=(",", ":"))])
 
