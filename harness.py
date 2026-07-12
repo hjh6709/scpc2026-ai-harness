@@ -198,15 +198,51 @@ class FinalHarness:
         return answer
 
     def _compute_answer(self, task: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
+        # Staged per-field try/except instead of one try/except around the
+        # whole pipeline: an unseen-schema exception in a *later* stage (e.g.
+        # build_content_scope choking on a record shape it doesn't recognize)
+        # used to blow away an already-correct focal_id/control from the
+        # earlier stages, since the single outer try/except in answer_task
+        # would replace the whole answer with _fallback_answer()'s blanket
+        # "ask". Catching each stage separately keeps whatever the real logic
+        # already got right - answer_task's existing _reconcile_answer safety
+        # net (which forces content_scope/policy/plan_events into whatever
+        # shape validate_answer_consistency requires for the given control,
+        # without touching focal_id/target) then only has to repair the one
+        # field that actually failed, not rebuild the answer from scratch.
+        # Unreachable on all 820 known dev+screening tasks - no field
+        # computation raises there - so this only matters for genuinely
+        # unseen data.
         evidence = self.slm.summarize_task(task)
         view = TaskView(task)
-        focal = choose_focal(view)
+        try:
+            focal = choose_focal(view)
+        except Exception:
+            focal = {}
         focal_id = str(focal.get("id") or "")
-        control = decide_control(view, focal, evidence, session)
-        target = infer_target(view, focal, control, session, self.user_memory)
-        scope = build_content_scope(view, focal, control, evidence)
-        policy = build_policy(view, focal, control, scope, evidence)
-        plan_events = build_plan_events(focal_id, target, control, scope, policy)
+        try:
+            control = decide_control(view, focal, evidence, session)
+        except Exception:
+            # hold forces content_scope.mode="none" downstream - the one
+            # control value that guarantees nothing gets disclosed when the
+            # real decision logic couldn't be trusted.
+            control = "hold"
+        try:
+            target = infer_target(view, focal, control, session, self.user_memory)
+        except Exception:
+            target = "user"
+        try:
+            scope = build_content_scope(view, focal, control, evidence)
+        except Exception:
+            scope = {"mode": "none", "allowed_fields": [], "excluded_fields": [], "requires_user_confirmation": True}
+        try:
+            policy = build_policy(view, focal, control, scope, evidence)
+        except Exception:
+            policy = {"risk_flags": ["clarification_required"], "violations": [], "requires_confirmation": True}
+        try:
+            plan_events = build_plan_events(focal_id, target, control, scope, policy)
+        except Exception:
+            plan_events = [{"verb": "clarify", "target": "user", "args": {"reason": "clarification_required"}}]
         return {
             "focal_id": focal_id,
             "target": target,
@@ -372,7 +408,7 @@ def choose_focal(view: TaskView) -> dict[str, Any]:
             return by_ref[best_ref]
 
     prompt_tokens = tokens(view.prompt)
-    best = objects[0]
+    scored: list[tuple[int, dict[str, Any]]] = []
     best_score = -1
     for obj in objects:
         attrs = obj.get("attrs") or {}
@@ -380,10 +416,29 @@ def choose_focal(view: TaskView) -> dict[str, Any]:
         score = sum(1 for token in prompt_tokens if token in obj_text)
         if str(attrs.get("ref_code") or "") and str(attrs.get("ref_code")) in view.history_text:
             score += 2
+        scored.append((score, obj))
         if score > best_score:
-            best = obj
             best_score = score
-    return best
+    tied = [obj for score, obj in scored if score == best_score]
+    if len(tied) == 1:
+        return tied[0]
+    # Unreachable on all 820 known dev+screening tasks - every one of them
+    # resolves via an earlier branch (marker_trace/record scan/ref_code regex)
+    # before this fallback ever runs (dev-verified: 0/120, screening-verified:
+    # 0/700). Kept as a real tie-break rather than the previous "first object
+    # wins" default so this doesn't silently regress to an arbitrary JSON-order
+    # pick if unseen data ever lacks enough structural signal to resolve
+    # earlier - "most recently mentioned in history" is a generic, defensible
+    # recency heuristic (not tuned vocabulary) among still-tied candidates.
+    best_tied = tied[0]
+    best_position = -1
+    for obj in tied:
+        ref_code = str((obj.get("attrs") or {}).get("ref_code") or "")
+        position = view.history_text.rfind(ref_code) if ref_code else -1
+        if position > best_position:
+            best_position = position
+            best_tied = obj
+    return best_tied
 
 
 def _record_values_text(view: TaskView) -> str:
@@ -1046,6 +1101,20 @@ def build_content_scope(view: TaskView, focal: dict[str, Any], control: str, evi
         or _condition_uncertain(view)
         or ("ambiguous_focal" in view.record_types and view.record_value("resolved_target") is not None)
     ):
+        # Tried replacing this keyword check with a constant "summary" after
+        # finding the raw scope_mode_exact rate for the keyword check (11/23
+        # on this branch's real reachable dev population) was below always
+        # guessing "summary" (13/23). Reverted: the *overall* dev score went
+        # down (0.9389 -> 0.9378) despite that, because content_scope's real
+        # weight is 0.40*mode + 0.25*allowed + 0.25*excluded + 0.10*confirm -
+        # several of the keyword-correct "redacted" cases already had
+        # allowed/excluded/confirm all matching (losing just the 0.4 mode
+        # share each), while the keyword-wrong "summary" cases it would have
+        # fixed weren't all otherwise-perfect, so the net weighted swing was
+        # negative even though the raw exact-match count looked better. A
+        # scope_mode_exact-only proxy is not a reliable proxy for this axis's
+        # real weighted contribution - verify against the actual dev overall
+        # score, not a sub-metric, before trusting a change here.
         mode = "redacted" if _has_value(view, "민감", "점검 내용", "check summary", "원본", "사진", "duration_ambiguous", "전제 조건") else "summary"
         return {"mode": mode, "allowed_fields": ["summary"], "excluded_fields": ["raw_quote"], "requires_user_confirmation": True}
     if control == "ask":

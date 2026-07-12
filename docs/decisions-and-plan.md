@@ -435,3 +435,17 @@ BOM 제거 이후 재제출한 실제 리더보드 점수가 0.7509로, 이전(0
 **self-test로 도구 자체를 검증**: 이미 이 세션에서 손으로 확인한 두 건을 도구로 재현 — "보류 후보로 남겼고"는 dev 14/120, 정확도 21%(3/14), screening 0건("dev-only 패턴" 경고까지 자동 출력)으로 정확히 재현됨. "우선한다"는 원시 리터럴 검사(`_precondition_invalidated`에 실제로 게이트된 좁은 조건이 아니라 `view.all_text` 전체 매칭)로는 dev 75/120·정확도 16%로 나와, 실제 코드에 패치했을 때의 "36/120 붕괴"와 숫자가 다름 — **이건 도구의 결함이 아니라 의도된 한계**: 이 도구는 "원시 후보 신호가 정답과 얼마나 상관있는가"를 보는 1차 필터일 뿐, 실제 코드의 특정 게이트(`types & PRECONDITION_RECORD_TYPES` 등)에 물렸을 때의 캐스케이드 효과까지는 못 봄 — 그래서 모듈 docstring에 "이 도구를 통과해도 실제 채택 전엔 반드시 전체 세션 스레딩 before/after 비교를 해야 한다"고 명시.
 
 **검증**: 74개 테스트 통과(harness.py 변경 없음), self-test 두 건 모두 기존 손검증 결과와 일치(두 번째는 정확히, 첫 번째는 도구 범위 차이로 다르지만 예상된 차이임을 확인).
+
+## "불가능하다고만 하지 말고 실제로 고쳐라" — 외부 제안 6건(#6~#11) 검증, 2건 채택·1건 채택 후 회귀 발견해 되돌림·1건 이미 구현됨 확인·2건 기각
+
+**#6 (focal fallback 동점 처리) — 채택**: `choose_focal`의 토큰스코어링 fallback이 동점일 때 `objects[0]`(리스트상 첫 항목)이 무조건 이기던 부분을 "history 내 ref_code 최근 언급 위치" 기준 타이브레이커로 교체. 실측: 이 fallback 분기 자체가 dev+screening 820개 전체에서 도달 사례 **0건**(전부 marker_trace/record 스캔/ref_code 정규식 같은 앞선 분기에서 이미 해결됨) — 지금 당장 깨진 사례는 없지만, hidden 데이터에서 구조적 신호가 부족한 경우를 대비한 방어적 개선. dev 0.9389 그대로, submission.csv 무변화(예상대로), 74개 테스트 통과.
+
+**#7 (단계별 예외 처리로 부분 정답 보존) — 채택**: `_compute_answer`의 단일 try/except를 `choose_focal`/`decide_control`/`infer_target`/`build_content_scope`/`build_policy`/`build_plan_events` 6단계 개별 try/except로 분리, 각 단계 실패 시 그 필드만 안전한 기본값(focal={}, control="hold", target="user" 등)으로 대체하고 이미 성공한 이전 단계 값은 보존. 기존 `_reconcile_answer`(focal_id/target 보존하며 control에 맞게 scope/policy/plan만 강제 정합화)와 자연스럽게 합성되어, 예외 발생 시 `_fallback_answer()`의 고정 "ask"로 전부 날아가던 것을 방지. `build_content_scope`가 예외를 던지도록 조작한 시뮬레이션으로 실측: 정답 `focal_id`(`obj_9a1c46cc17f8`)가 예외 상황에서도 정확히 보존됨을 확인. dev 0.9389 그대로, submission.csv 무변화(현재 실제 예외 0건이라 당연), 74개 테스트 + 전체 audit 통과.
+
+**#9 (content_scope mode를 키워드 대신 상수/contained_fields로) — 처음엔 채택했다가 실제 dev 점수 하락을 발견해 되돌림**: 이 분기의 실제 도달 population(n=23, 세션 스레딩 포함)에서 키워드 방식 11/23 vs "항상 summary" 13/23 vs contained_fields 11/23 vs OR결합 12/23 vs AND결합 10/23 — 키워드 방식이 상수보다 못하다는 걸 확인하고 "항상 summary"로 교체 적용. 하지만 **종합 dev 점수가 0.9389→0.9378로 하락**하는 걸 뒤늦게 발견 — `content_scope` 실제 가중치가 `0.40*mode + 0.25*allowed + 0.25*excluded + 0.10*confirm`인데, 키워드가 맞히던 "redacted" 사례들(`bce8783d4e90` 등)은 allowed/excluded/confirm이 이미 다 맞아서 mode 하나만 틀리면 1.0→0.6으로 크게 깎이는 반면, 새로 맞힌 "summary" 사례들은 다른 필드까지 다 맞았다는 보장이 없어 순가중합이 마이너스였음. **scope_mode_exact 같은 서브 지표 단독 개선이 종합 점수 개선을 보장하지 않는다는 걸 실측으로 확인** — 즉시 원래 키워드 로직과 테스트로 되돌리고, 이 교훈을 코드 주석에 남김. 되돌린 뒤 dev 0.9389 재확인.
+
+**#10 (예외 검증 실패 시 control을 최대한 보존) — 이미 구현돼 있음을 재확인**: `_reconcile_answer()`를 다시 읽어보니, 이미 이전 라운드에 정확히 이 요구사항대로 구현돼 있었음 — `focal_id`/`target`은 절대 안 건드리고, `control`값에 맞춰 `validate_answer_consistency`가 요구하는 정확한 조합(hold/ask/status_only/amend/proceed elif 순서)으로 `content_scope`/`policy`/`plan_events`만 강제 정합화. 제안이 요구한 것과 이미 동일한 로직이라 추가 작업 없음.
+
+**#8(형태소 분석기/BM25) & #11(SentenceTransformer 임베딩)** — 둘 다 외부 패키지/모델이 필요해 규정 위반으로 기각. 특히 #11은 사실관계도 틀렸음: `infer_target`의 `persistent_memory_recall`은 프롬프트 텍스트 유사도가 아니라 `recall.get("memory_key")`라는 **구조적 record 필드**로 조회 —애초에 자연어 표현 변형에 흔들릴 수 없는 설계.
+
+**검증**: 최종 74개 테스트 통과, dev 0.9389, `audit_screening.py` 전체 클린(exception/order-invariance/shape 전부 0), `submission.csv`는 #6/#7만 반영(현재 실제 영향 0, 방어적 개선)하고 #9는 완전히 원상복구.
