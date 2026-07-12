@@ -427,3 +427,11 @@ BOM 제거 이후 재제출한 실제 리더보드 점수가 0.7509로, 이전(0
 **`order_invariance_check` 추가(`audit_screening.py`)**: `device_state.objects`/`records`는 순서가 의미를 갖지 않는 집합 데이터인데, `choose_focal`의 fallback 스코어링(동점 시 첫 항목 우선) 등 순서에 우연히 의존하는 로직이 있다면 셔플했을 때 결정(`focal_id`/`target`/`control`)이 바뀔 수 있음 — 이건 정답을 몰라도 "확실한 버그"로 잡을 수 있는 불변성. 세션 내 모든 태스크의 `objects`/`records`를 각각 셔플해서 재실행하고 baseline과 비교하는 방식으로 구현, dev+screening 820개 전체에 대해 실행: **0/820건에서 순서 변화로 답이 바뀜 확인** — choose_focal의 ref-code/marker/ordinal 매칭이 실제로 순서에 안전하다는 걸 라벨 없이 직접 실증. `audit_screening.py`의 정식 섹션으로 편입해 앞으로 제출 전마다 재실행 가능.
 
 **검증**: 74개 테스트 통과, `audit_screening.py --tasks screening_tasks.jsonl --dev-tasks dev_tasks.jsonl` 재실행 시 order invariance 섹션 포함 전부 클린.
+
+## Snorkel(weak supervision) 진단 어휘를 빌려온 `diagnostics/label_function_audit.py` 추가
+
+**배경**: Snorkel 자체(생성모델 MLE 학습, 판별 분류기)는 ML 라이브러리 금지 규정상 도입 불가. 다만 "후보 규칙을 채택하기 전에 Coverage/Overlaps/Conflicts/Empirical Accuracy를 먼저 계산해본다"는 진단 방법론은, 이 세션 내내 새 제안이 들어올 때마다 손으로 매번 새로 짜온 검증 스크립트(예: "우선한다" dev 36/120 붕괴, "보류 후보로 남겼고" 14건 중 3/14만 hold)를 정식화한 것과 동일. 재사용 가능한 함수(`audit_label_function`)로 만들어 `dev_coverage`/`dev 경험적 정확도`/`dev_conflicts`/`screening_coverage`를 한 번에 계산하도록 함.
+
+**self-test로 도구 자체를 검증**: 이미 이 세션에서 손으로 확인한 두 건을 도구로 재현 — "보류 후보로 남겼고"는 dev 14/120, 정확도 21%(3/14), screening 0건("dev-only 패턴" 경고까지 자동 출력)으로 정확히 재현됨. "우선한다"는 원시 리터럴 검사(`_precondition_invalidated`에 실제로 게이트된 좁은 조건이 아니라 `view.all_text` 전체 매칭)로는 dev 75/120·정확도 16%로 나와, 실제 코드에 패치했을 때의 "36/120 붕괴"와 숫자가 다름 — **이건 도구의 결함이 아니라 의도된 한계**: 이 도구는 "원시 후보 신호가 정답과 얼마나 상관있는가"를 보는 1차 필터일 뿐, 실제 코드의 특정 게이트(`types & PRECONDITION_RECORD_TYPES` 등)에 물렸을 때의 캐스케이드 효과까지는 못 봄 — 그래서 모듈 docstring에 "이 도구를 통과해도 실제 채택 전엔 반드시 전체 세션 스레딩 before/after 비교를 해야 한다"고 명시.
+
+**검증**: 74개 테스트 통과(harness.py 변경 없음), self-test 두 건 모두 기존 손검증 결과와 일치(두 번째는 정확히, 첫 번째는 도구 범위 차이로 다르지만 예상된 차이임을 확인).

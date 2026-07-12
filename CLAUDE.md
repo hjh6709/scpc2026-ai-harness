@@ -45,6 +45,12 @@ status_only 관례 체크, 미인식 object 필드, rule coverage, correction-cl
 record value, **order invariance**(objects/records 셔플해도 focal/target/control 불변해야 함 — 정답
 라벨 없이 순서 의존 버그를 잡는 mutation test).
 
+새 트리거 후보를 검증할 땐 매번 새 스크립트를 짜지 말고 `diagnostics/label_function_audit.py`의
+`audit_label_function(predicate, field, implied_value, dev_tasks, dev_answers, screening_tasks)`를
+써라 — dev coverage/경험적 정확도/conflicts/screening coverage를 한 번에 계산해준다. 단, 이건 원시
+predicate의 1차 필터일 뿐 실제 코드의 특정 게이트에 물렸을 때 캐스케이드 효과까지는 못 본다 — 통과해도
+채택 전엔 반드시 원칙 4(세션 스레딩 before/after 비교)를 따로 수행할 것.
+
 ## 커밋 컨벤션
 
 - Co-Authored-By: Claude 트레일러 넣지 않음(사용자 지시).
